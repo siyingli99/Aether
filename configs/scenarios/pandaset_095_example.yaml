@@ -1,0 +1,33 @@
+# Example scenario for AETHER.
+# All paths can be absolute; relative paths resolve against $PWD.
+scene_name: pandaset_095_aether_demo
+mode: easy
+
+# 1. Where the DriveStudio checkpoint lives.  Must contain `config.yaml`
+#    next to the .pth (drivestudio writes both at the end of training).
+checkpoint: ${aether:data/checkpoints/pandaset_outputs}/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth
+
+# 2. Optional: pickle with the lidar pose trajectory in DriveStudio world
+#    frame.  When present, the env anchors the ego at the first non-zero
+#    pose so AD inputs use sensible coordinates.  We re-use the file
+#    drivestudio_2_hugsim already produces.
+lidar_poses_pkl: ${aether:data/exported_scenes}/pandaset/pandaset_095_final/ground_param.pkl
+
+# 3. Ego initial state in env frame (x=fwd, y=left, yaw in degrees).
+start_ab:    [0.0, 0.0]
+start_euler: [0.0, 90.0, 0.0]   # yaw=90deg  (pointing along +y / north)
+start_velo:  1.0
+start_steer: 0.0
+
+ego_whl: [1.6, 1.5, 3.0]
+
+# 4. NPC actors.  Empty list = no scripted NPCs (only the ego is alive).
+#    Each entry overrides one DriveStudio instance per frame.
+#    When omitted, RigidNodes / SMPLNodes still render at their *trained*
+#    poses, which is the closest analog to "free replay".
+actors: []
+
+termination:
+  fg_collision: true
+  fg_collision_min_overlap: 0.10
+  max_steps: 400

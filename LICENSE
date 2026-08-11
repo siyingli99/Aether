@@ -1,0 +1,48 @@
+AETHER RESEARCH-ONLY LICENSE
+
+Copyright (c) 2026 AETHER contributors. All rights reserved.
+
+Permission is granted, free of charge, to use, reproduce, and modify the
+AETHER-authored portions of this repository solely for non-commercial
+research and educational purposes, subject to the following conditions:
+
+1. This copyright notice and these terms must be retained in all copies or
+   substantial portions of the AETHER-authored material.
+2. The material may not be used, directly or indirectly, for commercial
+   purposes, commercial services, product development, or production
+   deployment without separate prior written permission from the relevant
+   copyright holders.
+3. Publications or public demonstrations should identify AETHER and the
+   applicable third-party projects and datasets.
+4. Redistribution must exclude any data, models, checkpoints, or other
+   material for which the redistributor lacks explicit redistribution rights.
+
+THE MATERIAL IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, SAFETY, OR CORRECTNESS. IN NO
+EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY ARISING FROM THE MATERIAL OR ITS USE.
+
+Third-party exception
+---------------------
+
+This license applies only to code and documentation authored for AETHER. It
+does not relicense, supersede, or restrict third-party material. Third-party
+components remain governed by their original licenses, including:
+
+- third_party/drivestudio/LICENSE (MIT)
+- third_party/splatad_gsplat/LICENSE (Apache License 2.0)
+- third_party/uniad_sim/LICENSE (Apache License 2.0)
+- third_party/difix3d/LICENSE.txt (NVIDIA license; non-commercial terms)
+
+See THIRD_PARTY_NOTICES.md and nested license files for details. Embedded
+dependencies within those components may carry additional notices.
+
+Data and model rights
+---------------------
+
+No right to redistribute PandaSet data, SMPL models (including
+SMPL_NEUTRAL.pkl), UniAD checkpoints, Difix/Hugging Face weights, or any
+other externally obtained asset is granted or asserted by this license.
+Users are responsible for obtaining these materials from authorized sources
+and complying with their respective terms.

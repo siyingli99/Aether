@@ -1,0 +1,59 @@
+# Spec used to (re)create the AETHER conda env from scratch.
+# Built on top of DriveStudio's CUDA 12.8 / PyTorch 2.7 stack and adds
+# the gym-IPC bits AETHER itself needs.  RTX 50-series owners must
+# rebuild gsplat / nvdiffrast for sm_120 (see drivestudio docs).
+name: aether
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - ninja
+  - pip:
+      # ---- DriveStudio core (CUDA 12.8) -----------------------------
+      - --extra-index-url=https://download.pytorch.org/whl/cu128
+      - torch==2.7.0+cu128
+      - torchvision==0.22.0+cu128
+      - torchaudio==2.7.0+cu128
+      - xformers==0.0.30
+      - timm==0.9.5
+      - pytorch_msssim==1.0.0
+      - omegaconf==2.3.0
+      - torchmetrics==1.0.0
+      - tensorboard==2.15.0
+      - wandb==0.16.0
+      - matplotlib==3.10.1
+      - plotly==5.18.0
+      - viser==0.2.1
+      - imageio
+      - imageio-ffmpeg
+      - scikit-image==0.22.0
+      - opencv-python
+      - open3d==0.18.0
+      - pyquaternion==0.9.9
+      - chumpy
+      - numpy==1.26.4
+      - kornia==0.7.2
+      - tqdm
+      - gdown
+      - nerfview==0.0.3
+      - lpips==0.1.4
+      # ---- AETHER simulator extras ---------------------------------
+      - gymnasium>=0.29
+      - shapely>=2.0
+      - moviepy>=2.0
+      - PyYAML>=6.0
+      - rich
+      # ---- Difix RGB refinement (same AETHER environment) ----------
+      - diffusers==0.25.1
+      - transformers==4.38.0
+      - peft==0.9.0
+      - huggingface-hub==0.25.1
+      - einops
+      # ---- Build-from-source after env create ----------------------
+      # RGB gsplat:    pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.3.0
+      # LiDAR kernel:  build third_party/splatad_gsplat from source
+      # nvdiffrast:    pip install git+https://github.com/NVlabs/nvdiffrast.git
+      # smplx, etc:    follow drivestudio docs/INSTALL.md

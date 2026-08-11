@@ -1,0 +1,85 @@
+schema_version: 1
+notice: >
+  Local inventory with checksums for files currently available to the maintainer.
+  No public download URL is asserted. Redistribution of every listed asset
+  requires a separate rights review.
+
+assets:
+  - name: pandaset095_rgb_checkpoint
+    path: data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth
+    size_bytes: 575824329
+    sha256: 6a05b6212129240dc350f391130a2f562a6ed59380549e5bdb4ec3bde1a558f6
+    required: true
+    purpose: RGB 3DGS rendering for the default scene
+    redistributable: review_required
+
+  - name: pandaset095_rgb_config
+    path: data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/config.yaml
+    approximate_size: small
+    sha256: a50d63a8521237cbd2560ba025af5273a00171cfb30fec5b0b976b1a2653c8bb
+    required: true
+    purpose: Configuration paired with checkpoint_final.pth
+    redistributable: review_required
+
+  - name: pandaset095_ego_poses
+    path: data/pandaset/processed/095/ego_pose/
+    approximate_size: part_of_minimum_bundle_approximately_550_MB
+    required: true
+    purpose: Scene 095 ego trajectory
+    redistributable: review_required
+
+  - name: pandaset095_camera_extrinsics
+    path: data/pandaset/processed/095/extrinsics/000_*.txt
+    approximate_size: small
+    required: true
+    purpose: Six-camera calibration
+    redistributable: review_required
+
+  - name: pandaset095_ground_parameters
+    path: data/exported_scenes/pandaset/pandaset_095_final/ground_param.pkl
+    approximate_size: part_of_minimum_bundle_approximately_550_MB
+    sha256: 328d8f3885ff51cd316b1c166aa5c0dee2a3c287fd0eb9bcf95e8fc19c92b40c
+    required: true
+    purpose: Ground and LiDAR pose alignment used by the default scenario
+    redistributable: review_required
+
+  - name: pandaset095_traffic_replay
+    path: configs/scenarios/traffic/pandaset_095_aether.npz
+    approximate_size: approximately_120_KB
+    sha256: 26f6de7f196c2b92d60cb94abeb8260eb9231238412abe6f76c66e6e6cf68120
+    required: false
+    purpose: Actor log replay for the full editable/UniAD scenario
+    redistributable: review_required
+
+  - name: pandaset095_full_processed_archive
+    path: assets/local/pandaset095_processed.zip
+    size_bytes: 673970412
+    sha256: 610872ec13dc7fa61d79e8323a1024ed7dd5a81822026afd619022c775ca5a9d
+    required: false
+    purpose: Reconstruction, Phase-B LiDAR training, and corpus generation only
+    redistributable: review_required
+
+  - name: uniad_checkpoint
+    path: checkpoints/uniad_base_e2e.pth
+    approximate_size: upstream_dependent
+    required: false
+    purpose: Optional UniAD closed loop
+    redistributable: review_required
+
+  - name: difix_model_weights
+    path: external_huggingface_cache_or_user_selected_location
+    approximate_size: upstream_dependent
+    required: false
+    purpose: Optional Difix3D RGB refinement
+    redistributable: review_required
+
+  - name: phase_b_lidar_sidecar
+    path: user_outputs/lidar_sidecar/
+    approximate_size: training_dependent
+    required: false
+    purpose: User-trained paper-grade SplatAD LiDAR
+    redistributable: review_required
+
+excluded:
+  - name: SMPL_NEUTRAL.pkl
+    reason: Not required for current scene 095 runtime and must not be redistributed

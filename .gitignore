@@ -1,0 +1,73 @@
+# Python/editor caches
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.idea/
+.vscode/
+
+# Local environments
+.conda/
+.venv/
+venv/
+env/
+
+# Logs and generated outputs
+*.log
+logs/
+outputs/
+output/
+work_dirs/
+runs/
+wandb/
+tensorboard/
+aether_smoke/
+paper_exp/outputs/
+paper_exp/results/
+
+# Model weights and checkpoints (source files are not matched)
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+checkpoints/
+weights/
+
+# Local/private archives
+assets/local/
+assets/local/*.zip
+!assets/README.md
+!assets/manifest.yaml
+
+# Large datasets and generated corpora
+data/**
+!data/
+!data/**/
+!data/**/README.md
+!data/**/README_ZH.md
+!data/**/manifest.yaml
+!data/**/manifest.yml
+distill_corpus/
+multimodal_corpus/
+lidar_pairs/
+
+# Generated media and reports
+*.mp4
+*.avi
+*.mov
+*.npy
+*.npz
+*.pkl
+*.pickle
+!third_party/uniad_sim/data/**/*.pkl
+reports/
+
+# OS/temp
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
