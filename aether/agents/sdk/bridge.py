@@ -1,13 +1,4 @@
-"""HUGSIM-compatible FIFO bridge for adapter authors.
-
-Spawns a blocking read/infer/write loop:
-
-* Reads pickle obs from ``$output_dir/obs_pipe``.
-* Sentinel ``"Done"`` (string) → exit cleanly.
-* Calls ``agent.infer(obs)`` and writes the dict back to ``$output_dir/plan_pipe``.
-
-Plan dict must contain ``plan_traj`` of shape ``(T, 2)`` in ego-local frame.
-"""
+"""FIFO bridge used by external end-to-end planners."""
 from __future__ import annotations
 import os
 import pickle
@@ -16,6 +7,8 @@ import time
 import traceback
 from abc import ABC, abstractmethod
 from typing import Any, Dict
+
+import numpy as np
 
 
 class BaseAgent(ABC):
@@ -27,7 +20,7 @@ class BaseAgent(ABC):
         pass
 
     @abstractmethod
-    def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]: ...
+    def infer(self, obs: Dict[str, Any], info: Dict[str, Any]) -> Any: ...
 
     def teardown(self) -> None:  # noqa: B027
         pass
@@ -49,6 +42,19 @@ def _open_fifo_write(path: str, retries: int = 600):
     raise FileNotFoundError(f"plan pipe never appeared: {path}")
 
 
+def _trajectory(value: Any) -> np.ndarray:
+    """Normalize an adapter result to AETHER's ``(right, forward)`` path."""
+    if isinstance(value, dict):
+        value = value.get("plan_traj")
+    plan = np.asarray(value, dtype=np.float32)
+    if plan.ndim != 2 or plan.shape[0] < 1 or plan.shape[1] < 2:
+        raise ValueError(f"planner must return a non-empty Nx2 path, got {plan.shape}")
+    plan = plan[:, :2]
+    if not np.isfinite(plan).all():
+        raise ValueError("planner path contains non-finite values")
+    return plan
+
+
 def serve(agent: BaseAgent,
           cuda_id: str | None = None,
           output_dir: str | None = None,
@@ -68,34 +74,26 @@ def serve(agent: BaseAgent,
     agent.setup()
     obs_path = os.path.join(agent.output_dir, obs_name)
     plan_path = os.path.join(agent.output_dir, plan_name)
-    obs_f = _open_fifo_read(obs_path)
-    plan_f = _open_fifo_write(plan_path)
-    print("[aether-adapter] pipes connected, awaiting obs", flush=True)
+    print("[aether-adapter] ready; waiting for obs", flush=True)
     try:
         while True:
-            try:
+            # AETHER opens and closes both FIFOs once per frame. Matching that
+            # lifecycle lets the reader use ``read()`` without waiting forever
+            # for an EOF from a persistent writer.
+            with _open_fifo_read(obs_path) as obs_f:
                 payload = pickle.load(obs_f)
-            except EOFError:
-                obs_f.close()
-                obs_f = _open_fifo_read(obs_path, retries=200)
-                continue
             if isinstance(payload, str) and payload == "Done":
                 print("[aether-adapter] received Done — exiting", flush=True)
                 break
             try:
-                plan = agent.infer(payload)
+                if not isinstance(payload, tuple) or len(payload) != 2:
+                    raise ValueError("expected the (obs, info) payload from AETHER")
+                obs, info = payload
+                plan = _trajectory(agent.infer(obs, info))
             except Exception:
                 traceback.print_exc()
-                plan = {"plan_traj": [[0.0, 0.0]] * 6, "error": True}
-            pickle.dump(plan, plan_f, protocol=pickle_protocol)
-            plan_f.flush()
+                plan = None
+            with _open_fifo_write(plan_path) as plan_f:
+                pickle.dump(plan, plan_f, protocol=pickle_protocol)
     finally:
-        try:
-            obs_f.close()
-        except Exception:
-            pass
-        try:
-            plan_f.close()
-        except Exception:
-            pass
         agent.teardown()

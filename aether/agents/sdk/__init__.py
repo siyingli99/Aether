@@ -1,4 +1,4 @@
-"""Aether Adapter SDK.
+"""AETHER adapter SDK.
 
 Authors of new AD adapters can subclass :class:`BaseAgent` and call
 :func:`serve` to wire it up to the FIFO protocol used by ``aether/closed_loop``::
@@ -9,9 +9,9 @@ Authors of new AD adapters can subclass :class:`BaseAgent` and call
         def setup(self):
             self.model = load_my_model()
 
-        def infer(self, obs):
-            plan = self.model(obs["rgb_front"])
-            return {"plan_traj": plan}  # (T, 2)
+        def infer(self, obs, info):
+            images = obs["rgb"]
+            return self.model(images, info)  # (T, 2): right, forward
 
     if __name__ == "__main__":
         serve(MyAgent())

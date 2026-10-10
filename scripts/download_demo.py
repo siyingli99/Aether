@@ -13,7 +13,7 @@ import zipfile
 from huggingface_hub import hf_hub_download
 
 
-REPO_ID = "mikkochi/AETHER_Demo"
+REPO_URL = "https://huggingface.co/datasets/mikkochi/AETHER_Demo"
 ARCHIVES = {
     "0383": "scenes/nuscenes_0383.zip",
     "088": "scenes/nuscenes_088.zip",
@@ -39,17 +39,34 @@ def safe_extract(archive: Path, destination: Path) -> None:
         bundle.extractall(root)
 
 
+def repo_id(value: str) -> str:
+    """Accept either a Hugging Face dataset URL or an owner/name id."""
+    value = value.strip().rstrip("/")
+    prefix = "https://huggingface.co/datasets/"
+    if value.startswith(prefix):
+        value = value[len(prefix):]
+    if value.count("/") != 1 or not all(value.split("/")):
+        raise ValueError(
+            "--repo must be a Hugging Face dataset URL or an owner/name id"
+        )
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene", choices=["0383", "088", "all"], default="all")
     parser.add_argument("--no-assets", action="store_true")
-    parser.add_argument("--repo-id", default=REPO_ID)
+    parser.add_argument(
+        "--repo", "--repo-id", dest="repo", default=REPO_URL,
+        help="Hugging Face dataset URL or owner/name id",
+    )
     parser.add_argument("--output", default=str(Path(__file__).resolve().parents[1]))
     args = parser.parse_args()
 
     output = Path(args.output).expanduser().resolve()
+    dataset_id = repo_id(args.repo)
     manifest_path = Path(hf_hub_download(
-        args.repo_id, "manifest.json", repo_type="dataset"
+        dataset_id, "manifest.json", repo_type="dataset"
     ))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     selected = ["0383", "088"] if args.scene == "all" else [args.scene]
@@ -58,7 +75,7 @@ def main() -> None:
 
     for key in selected:
         filename = ARCHIVES[key]
-        local = Path(hf_hub_download(args.repo_id, filename, repo_type="dataset"))
+        local = Path(hf_hub_download(dataset_id, filename, repo_type="dataset"))
         expected = manifest["files"][filename]["sha256"]
         actual = sha256(local)
         if actual != expected:

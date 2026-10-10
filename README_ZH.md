@@ -2,166 +2,76 @@
 
 [English](README.md)
 
-AETHER 是一个可编辑的 3D Gaussian 自动驾驶仿真器：使用 DriveStudio
-重建三维场景，删除原场景动态前景并导入外部车辆资产，由 LimSim 控制背景
-交通流，所有六路相机图像经 Difix 修复后再送入 UniAD 等端到端算法，形成
-完整闭环。
+AETHER 将可编辑的三维高斯场景、LimSim 交通流和端到端驾驶算法接入相机闭环仿真。
 
-## 当前保留的功能
+## 开源计划
 
-- 基于 DriveStudio 的三维场景重建与新视角渲染。
-- 相机仿真与 Gaussian 点云仿真。
-- 删除、恢复、替换和放置动态参与者。
-- 将 3DRealCar 重建结果转换为可复用 Gaussian 车辆资产。
-- 基于 nuScenes 高精地图拓扑的 LimSim 交通流。
-- 通用端到端算法接口和可直接使用的 UniAD 适配器。
-- 每次算法输入前强制修复六路相机图像；失败时不发送原图。
-- 自动生成 `LimSim 二维 | AETHER 三维` 同步视频与验收记录。
+- [x] 基于 DriveStudio 的场景重建与新视角渲染
+- [x] 相机与高斯点云仿真
+- [x] 动态物体编辑与 3DRealCar 资产导入
+- [x] nuScenes 高精地图导出与 LimSim 交通流
+- [x] 六路相机 Difix 修复
+- [x] UniAD 闭环适配器
+- [ ] 公开评测协议
 
-本版本暂不包含公开评测协议，也不包含算法诊断代码。
+## Quick Start
 
-## 已验证的最小闭环
-
-```text
-nuScenes 三维重建 + 高精地图
-        -> 删除原始动态前景
-        -> LimSim 输出背景车辆位姿
-        -> 放置 3DRealCar Gaussian 车辆
-        -> AETHER 渲染六路相机
-        -> Difix 修复全部六路图像
-        -> UniAD 输出规划轨迹
-        -> 更新自车并进入下一帧
-```
-
-提供两套完整示例：
-
-| 场景 | DriveStudio 索引 | 帧数 | 高精地图交通流 |
-|---|---:|---:|---|
-| nuScenes `scene-0383` | `300` | `39` | LimSim |
-| nuScenes `scene-0088` | `88` | `39` | LimSim |
-
-Hugging Face 中原有的 `data.zip` 是 PandaSet 095。该包没有高精地图，能用于
-重建和直接闭环，但不能运行这里提供的 LimSim 高精地图交通流闭环。
-
-## 1. 克隆代码
+### 克隆并安装 AETHER
 
 ```bash
 git clone https://github.com/siyingli99/Aether.git
 cd Aether
-```
-
-以下命令均在 Ubuntu/WSL2 的仓库根目录执行。
-
-## 2. 创建 AETHER 环境
-
-```bash
 conda create -p .conda/aether python=3.10 -y
 conda activate ./.conda/aether
 ```
 
-安装已验证的 CUDA 12.8 PyTorch：
-
 ```bash
 pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
   --index-url https://download.pytorch.org/whl/cu128
-```
-
-安装 AETHER 和渲染依赖：
-
-```bash
 pip install -r requirements.txt
 pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.3.0
 pip install git+https://github.com/NVlabs/nvdiffrast.git
 pip install -e third_party/drivestudio/third_party/smplx
-```
-
-SplatAD 光栅器已随仓库提供并会直接导入；第一次运行点云仿真时编译 CUDA
-扩展，不需要单独安装 SplatAD。
-
-检查代码环境：
-
-```bash
 python scripts/check_install.py
 ```
 
-## 3. 下载示例数据
-
-示例数据位于 Hugging Face 的 `mikkochi/AETHER_Demo`。如果仓库为私有，
-先登录一次：
+### 下载示例场景
 
 ```bash
 huggingface-cli login
+python scripts/download_demo.py \
+  --repo https://huggingface.co/datasets/mikkochi/AETHER_Demo \
+  --scene all
 ```
 
-下载 0383、088 和两辆 3DRealCar 车辆资产。脚本会校验每个压缩包的
-SHA-256，然后自动解压到代码所需位置：
-
-```bash
-python scripts/download_demo.py --scene all
-```
-
-只下载 0383 和车辆资产：
-
-```bash
-python scripts/download_demo.py --scene 0383
-```
-
-不加载 CUDA，快速检查数据是否完整：
+验证数据完整性：
 
 ```bash
 python scripts/check_demo.py --scene 0383
+python scripts/check_demo.py --scene 088
 ```
 
-解压后的结构如下：
+数据包包含 nuScenes `scene-0383` 和 `scene-0088` 的权重、相机数据、高精地图、LimSim 路网及两个车辆资产。车辆资产均来源于 [3DRealCar](https://xiaobiaodu.github.io/3drealcar/)。
 
-```text
-data/
-├── checkpoints/nuscenes_outputs/scene_recon_full/
-│   ├── scene_300_6cams_with_humans/
-│   └── scene_88_6cams_with_humans/
-├── nuscenes/processed_10Hz/trainval/{300,088}/
-├── limsim/nuscenes_{0383,088}/
-└── assets/vehicles/
-    ├── 3drealcar_2024_06_04_15_34_51/
-    └── 3drealcar_2024_06_04_13_44_39/
-```
+### 安装 LimSim
 
-两个车辆资产均直接由对应编号的
-[3DRealCar](https://xiaobiaodu.github.io/3drealcar/) 序列转换，不从
-nuScenes 训练场景中提取。
-
-## 4. 安装 AETHER 版 LimSim
-
-LimSim 以独立 GPL-3.0 进程运行，不复制到 AETHER 仓库中。将验证过的分支
-克隆到 AETHER 同级目录：
+在 AETHER 同级目录克隆已验证分支并创建环境：
 
 ```bash
 git clone --branch aether-integration \
   https://github.com/siyingli99/LimSim.git ../LimSim
-```
-
-创建独立环境：
-
-```bash
 conda create -p .conda/limsim python=3.10 -y
 conda run -p .conda/limsim \
   pip install -r ../LimSim/aether_bridge/requirements.txt
 ```
 
-闭环入口会自动启动并关闭无界面的 LimSim/SUMO 服务。
+`scripts/run_closed_loop.sh` 会自动启动和关闭 LimSim。
 
-## 5. 安装 UniAD
-
-创建独立 OpenMMLab 环境：
+### 安装 UniAD
 
 ```bash
 conda create -p .conda/uniad python=3.10 -y
 conda activate ./.conda/uniad
-```
-
-安装 UniAD 运行依赖：
-
-```bash
 pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
   --index-url https://download.pytorch.org/whl/cu128
 pip install openmim
@@ -170,106 +80,112 @@ pip install mmdet==2.26.0 mmdet3d==1.0.0rc6 mmsegmentation==0.29.1
 pip install -r third_party/uniad_sim/requirements.txt
 ```
 
-下载官方端到端权重：
-
 ```bash
 mkdir -p checkpoints
 wget -O checkpoints/uniad_base_e2e.pth \
   https://github.com/OpenDriveLab/UniAD/releases/download/v1.0.1/uniad_base_e2e.pth
-```
-
-回到 AETHER 环境：
-
-```bash
 conda activate ./.conda/aether
 ```
 
-## 6. 运行四步冒烟闭环
-
-0383：
-
-```bash
-AETHER_SCENARIO=configs/scenarios/nuscenes_0383_smoke.yaml \
-  bash scripts/run_closed_loop.sh 0383 --no_io_trace --refine_max_side 512
-```
-
-088：
-
-```bash
-AETHER_SCENARIO=configs/scenarios/nuscenes_088_smoke.yaml \
-  bash scripts/run_closed_loop.sh 088 --no_io_trace --refine_max_side 512
-```
-
-不要传入 `--no_refine`。这两份配置要求每路相机必须成功经过 Difix，否则
-闭环立即失败，不会把未经修复的图像传给算法。
-
-## 7. 运行完整闭环
+### 运行闭环
 
 ```bash
 bash scripts/run_closed_loop.sh 0383 --no_io_trace
+bash scripts/run_closed_loop.sh 088 --no_io_trace
 ```
 
-切换 GPU：
+使用 `AETHER_CUDA=1` 可切换 GPU。结果位于 `aether_results/nuscenes/<scene>/uniad/limsim_camera/`，其中 `limsim_aether.mp4` 是 LimSim/AETHER 同步视频。
 
-```bash
-AETHER_CUDA=1 bash scripts/run_closed_loop.sh 0383 --no_io_trace
-```
+## 场景配置与编辑
 
-主要结果位于
-`aether_results/nuscenes/<场景>/uniad/limsim_camera/`：
+### 配置入口
 
-```text
-limsim_aether.mp4          LimSim 全地图二维 + AETHER 六相机三维同步视频
-video.mp4                  六相机渲染视频
-data.pkl                   闭环轨迹
-refine_audit.json          每帧每相机 Difix 输入/输出哈希
-dynamic_removal_audit.json 原动态前景删除与外部车辆槽位记录
-perf.json                  耗时与闭环约束汇总
-```
+| 文件 | 在这里修改 | 读取位置 |
+|---|---|---|
+| `configs/scenarios/nuscenes_0383.yaml` | 权重、车辆初态、交通流、Difix 和终止条件 | `load_cfg()` 与 `AetherDrivingEnv` |
+| `configs/cameras/nuscenes.yaml` | 相机名称、分辨率、内参与算法外参 | `load_camera_rig()` |
+| `configs/kinematic.yaml` | 步长、轴距、加速度和转向限制 | `BicycleEgo.__init__()` / `BicycleEgo.step()` |
+| `data/limsim/nuscenes_0383/scene0383.rou.xml` | 车辆路线、出生位置和速度 | LimSim/SUMO |
+| `configs/adapters/uniad.yaml` | 算法进程与输入需求 | `load_adapter()` / `launch_adapter()` |
 
-## 8. 常用调参
+`configs/cameras/nuscenes.yaml` 中的 `H`、`W` 和内参决定渲染分辨率。运行时相机位姿由 `AetherDrivingEnv._load_static_c2w_ds()` 从 DriveStudio 预处理场景读取；`v2c` 和 `l2c` 会通过 `info["cam_params"]` 传给端到端算法。
 
-先复制场景配置：
+### 场景 YAML
 
 ```bash
 cp configs/scenarios/nuscenes_0383.yaml configs/scenarios/my_scene.yaml
 ```
 
-切换为第二辆 3DRealCar 车辆：
+| 字段 | 定义 | 实现位置 |
+|---|---|---|
+| `checkpoint` | DriveStudio 场景权重 | `AetherDrivingEnv.__init__()` 中的 `DriveStudioRenderer` |
+| `start_ab` | `[横向向右, 前向]`，单位米 | `BicycleEgo.reset()` |
+| `start_euler` | XYZ 欧拉角，单位度；索引 1 为偏航角，右转为正 | `BicycleEgo.__init__()` |
+| `start_velo`, `start_steer` | 初速度（m/s）与初始转角（rad） | `BicycleEgo.reset()` |
+| `ego_whl` | 自车 `[宽, 高, 长]`，单位米 | 碰撞框与 LimSim 自车状态 |
+| `traffic.asset_path` | 含 `asset.pt` 或 `gs.pth` + `wlh.json` 的目录 | `GaussianVehicleAsset.load()` |
+| `traffic.max_vehicles` | 可复用高斯车辆槽位数量 | `ExternalVehiclePool` |
+| `traffic.max_gaussians` | 每辆车保留的高斯球数量 | `GaussianVehicleAsset._prune()` |
+| `traffic.hide_original_dynamic` | 隐藏原场景的 `RigidNodes`、`DeformableNodes` 和 `SMPLNodes` | `ExternalVehiclePool._hide_all_original_dynamic()` |
+| `traffic.net_file` | 二维同步画面使用的路网 | `LimSimTopDownRenderer` |
+| `difix.required` | 任一路相机未修复即拒绝该帧 | `scripts/closed_loop.py:run()` |
+| `termination.max_steps` | 最大闭环步数 | `AetherDrivingEnv.step()` |
+| `termination.fg_collision_min_overlap` | 车辆碰撞的最小包围框重叠比例 | `_fg_collision_swept()` |
+| `termination.bg_threshold` | 自车框内背景高斯球的碰撞阈值 | `_bg_collision()` |
+| `termination.off_scene_radius`, `off_scene_streak` | 离开重建区域的容差 | `_off_scene_check()` |
 
-```yaml
-traffic:
-  asset_path: ${aether:data/assets/vehicles/3drealcar_2024_06_04_13_44_39}
-```
-
-修改交通密度和单车 Gaussian 数量：
-
-```yaml
-traffic:
-  max_vehicles: 6
-  max_gaussians: 30000
-```
-
-修改闭环步数和偏离道路容差：
-
-```yaml
-termination:
-  max_steps: 80
-  off_scene_radius: 6.0
-  off_scene_streak: 5
-```
-
-在速度与修复质量之间调节 Difix：
+示例场景要求每次调用算法前六路图像均成功通过 Difix。相关参数定义在 `scripts/closed_loop.py`：
 
 ```bash
 bash scripts/run_closed_loop.sh 0383 \
-  --refine_max_side 768 --refine_timestep 199 --refine_dtype bf16
+  --refine_max_side 768 \
+  --refine_timestep 199 \
+  --refine_dtype bf16 \
+  --no_io_trace
 ```
 
-## 9. 重建新场景
+### 修改交通流与高精地图拓扑
 
-先用仓库内 DriveStudio 工具预处理 nuScenes，再训练场景。`scene-0383`
-对应 DriveStudio 索引 `300`：
+修改以下文件中的 `<vehicle>` 节点：
+
+```text
+data/limsim/nuscenes_0383/scene0383.rou.xml
+data/limsim/nuscenes_088/scene088.rou.xml
+```
+
+`route` 选择道路边序列；`depart`、`departPos` 和 `departSpeed` 分别控制出生时间、纵向位置和速度。输出的背景车数量不能超过 `traffic.max_vehicles`，也不能超过 `../LimSim/aether_bridge/server.py` 中 `LimSimRuntime.__init__()` 的 `max_vehicles` 参数。
+
+通过 `extract_hd_map()` 和 `export()` 为其他 nuScenes 场景生成路网：
+
+```bash
+python tools/export_nuscenes_limsim_map.py \
+  --dataset-root /path/to/NuScenes \
+  --processed-scene data/nuscenes/processed_10Hz/trainval/<index> \
+  --location <nuscenes-map-name> \
+  --scene-label <scene-id> \
+  --prefix scene<scene-id> \
+  --output-dir data/limsim/nuscenes_<scene-id>
+```
+
+`extract_hd_map()` 将 nuScenes lane/lane-connector 图转换到道路局部坐标系；`export()` 生成 SUMO 节点、道路边、连接关系、路线和路网文件。随后在场景 YAML 中加入新路径，并扩展 `scripts/run_closed_loop.sh` 的场景选择逻辑。
+
+### 编辑车辆高斯资产
+
+```bash
+python tools/build_vehicle_asset.py \
+  --input /path/to/3DRealCar/<sequence> \
+  --output data/assets/vehicles/<name> \
+  --sequence-id <sequence> \
+  --max-gaussians 50000
+```
+
+将 `traffic.asset_path` 指向输出目录。`AetherDrivingEnv._init_traffic_backend()` 负责加载资产，`ExternalVehiclePool` 创建渲染槽位，`TrafficActorProvider.advance()` 在每个仿真时刻应用 LimSim 位姿。
+
+单实例编辑接口位于 `ExternalVehiclePool`：`original_gaussian_counts()` 列出原始车辆 ID，`set_original_visible(id, False)` 删除指定车辆，`extract_original(id)` 返回对应的高斯参数。示例配置通过 `hide_original_dynamic: true` 删除全部原始动态物体。
+
+### 重建场景与点云仿真
+
+`scripts/train_scene.py` 将 OmegaConf 参数传给 DriveStudio。nuScenes 索引 `300` 对应 `scene-0383`：
 
 ```bash
 python scripts/train_scene.py \
@@ -282,95 +198,167 @@ python scripts/train_scene.py \
   data.scene_idx=300
 ```
 
-该入口会把其他 OmegaConf 参数直接传给 DriveStudio。
-
-## 10. 点云仿真
-
-在 RGB 权重上训练冻结几何的 SplatAD sidecar：
+训练并检查点云 sidecar：
 
 ```bash
 python aether/train/joint_phase.py \
   --config_file third_party/drivestudio/configs/omnire.yaml \
   --resume_from data/checkpoints/nuscenes_outputs/scene_recon_full/scene_300_6cams_with_humans/checkpoint_final.pth \
-  --output_root outputs/dualmodal --project aether_joint/nuscenes \
-  --run_name scene300_joint --num_iters 10000 --freeze_geometry \
+  --output_root outputs/dualmodal \
+  --project aether_joint/nuscenes \
+  --run_name scene300_joint \
+  --num_iters 10000 --freeze_geometry \
   dataset=nuscenes/6cams \
-  data.data_root=data/nuscenes/processed_10Hz/trainval data.scene_idx=300
+  data.data_root=data/nuscenes/processed_10Hz/trainval \
+  data.scene_idx=300
 ```
-
-渲染 RGB、投影点云和 BEV：
 
 ```bash
 python aether/tools/viz_joint.py \
   --resume_from data/checkpoints/nuscenes_outputs/scene_recon_full/scene_300_6cams_with_humans/checkpoint_final.pth \
   --lidar_sidecar outputs/dualmodal/aether_joint/nuscenes/scene300_joint/lidar_sidecar_frozen.pt \
-  --frame_idx 0 --cam_idx 0 --out_png outputs/nuscenes_0383_lidar.png
+  --frame_idx 0 --cam_idx 0 \
+  --out_png outputs/nuscenes_0383_lidar.png
 ```
 
-当前 LimSim 示例专注相机闭环，因此配置中保持 `lidar.enabled: false`。
+## 接入新的端到端算法
 
-## 11. 场景编辑与外部资产
+一个适配器由 Python 类、启动脚本和 YAML 声明组成。
 
-将任意已经重建好的 3DRealCar 序列（包含 `gs.pth` 和 `wlh.json`）转换为
-AETHER 轻量资产：
+### 1. 实现算法类
+
+创建 `third_party/<planner>/aether_adapter.py`：
+
+```python
+import numpy as np
+
+from aether.agents.sdk import BaseAgent, serve
+
+CAMERAS = [
+    "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT",
+    "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT",
+]
+
+
+class MyPlanner(BaseAgent):
+    def setup(self):
+        # CUDA_VISIBLE_DEVICES 设置完成后调用一次。
+        self.model = load_model()
+
+    def infer(self, obs, info):
+        # 图像为 uint8 H x W x 3，且已经过 Difix。
+        images = [obs["rgb"][name] for name in CAMERAS]
+        path_forward_left = self.model(images, info)  # N x 2：前、左
+
+        # AETHER 输出：横向向右、前向，单位米。
+        path_forward_left = np.asarray(path_forward_left, dtype=np.float32)
+        return np.column_stack(
+            (-path_forward_left[:, 1], path_forward_left[:, 0])
+        )
+
+    def teardown(self):
+        pass
+
+
+if __name__ == "__main__":
+    serve(MyPlanner())
+```
+
+`BaseAgent.setup()` 只执行一次，`infer(obs, info)` 每个仿真步执行一次，`teardown()` 在退出时执行。`serve()` 负责 FIFO 时序、pickle 传输、轨迹校验和最终的 `Done` 消息。
+
+输入契约由 `AetherDrivingEnv._get_obs()` 和 `_get_info()` 定义：
+
+| 数据 | 类型与坐标定义 |
+|---|---|
+| `obs["rgb"][camera]` | `uint8[H,W,3]`，六路命名相机 |
+| `obs["depth"]`, `obs["lidar"]` | 可选；在场景和适配器 YAML 中启用 |
+| `info["ego_pos"]` | 仿真坐标系中的 `[横向向右, 0, 前向]`，单位米 |
+| `info["ego_rot"]` | XYZ 欧拉角，单位 rad；索引 1 为偏航角，右转为正 |
+| `info["ego_velo"]`, `info["ego_steer"]` | m/s 与 rad |
+| `info["command"]` | `0=右转`、`1=左转`、`2=直行` |
+| `info["cam_params"][camera]` | `intrinsic`、`v2c` 和 `l2c` 标定参数 |
+| 算法返回值 | 非空 `float N x 2`：当前自车局部系下的 `[横向向右, 前向]` 轨迹点，单位米 |
+
+LimSim 交通协议使用另一套统一坐标：`x=前`、`y=左`、`z=上`，偏航角逆时针为正。转换位于 `AetherDrivingEnv._traffic_ego_state()` 和 `FrameTransform`；不要把交通协议的符号直接用于算法输出。
+
+轨迹到控制量的转换位于 `scripts/closed_loop.py:_trajectory_states()` 和 `_traj_to_action()`。算法若输出 `[前, 左]`，按示例转换；若直接输出控制量，可在 `infer()` 内先转为轨迹，或将 `_traj_to_action()` 替换为专用控制接口。
+
+### 2. 添加启动脚本
+
+创建 `third_party/<planner>/run_aether.sh`：
 
 ```bash
-python tools/build_vehicle_asset.py \
-  --input /path/to/3DRealCar/<sequence> \
-  --output data/assets/vehicles/<name> \
-  --sequence-id <sequence> --max-gaussians 50000
+#!/usr/bin/env bash
+set -euo pipefail
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+planner_python="${PLANNER_PYTHON:-$repo_dir/.conda/<planner>/bin/python}"
+export PYTHONPATH="$repo_dir:${PYTHONPATH:-}"
+exec "$planner_python" -u "$repo_dir/third_party/<planner>/aether_adapter.py" "$1" "$2"
 ```
 
-当 `traffic.hide_original_dynamic: true` 时，原场景的 `RigidNodes`、
-`DeformableNodes` 和 `SMPLNodes` 会在第 0 帧前全部隐藏；随后创建可复用的
-车辆槽位，并按 LimSim 每个时刻的位姿更新。验收 JSON 会证明整段闭环中
-原始动态前景始终未重新出现。
+启动脚本依次接收 `<cuda_id> <output_dir>`，进程需保持运行，并输出 `waiting for obs`、`adapter ready` 或其他可被 `wait_adapter_ready()` 识别的标记。
 
-手工脚本场景可使用 YAML/BEV 编辑器：
+### 3. 注册并运行
 
-```bash
-python -m aether.tools.scenario_editor configs/scenarios/nuscenes_0383.yaml
+创建 `configs/adapters/<planner>.yaml`：
+
+```yaml
+name: <planner>
+display_name: <Planner>
+
+launcher:
+  type: shell
+  entrypoint: third_party/<planner>/run_aether.sh
+  cwd: third_party/<planner>
+  args: ["${cuda_id}", "${output_dir}"]
+  env:
+    PYTHONUNBUFFERED: "1"
+
+ipc:
+  protocol: hugsim_pickle_v1
+  obs_pipe: obs_pipe
+  plan_pipe: plan_pipe
+  pickle_protocol: 4
+  done_sentinel: Done
+
+observation:
+  cameras: [CAM_FRONT, CAM_FRONT_LEFT, CAM_FRONT_RIGHT, CAM_BACK, CAM_BACK_LEFT, CAM_BACK_RIGHT]
+  needs_depth: false
+  needs_lidar: false
+
+output:
+  type: trajectory
+  frame: ego_local
+  fields: [lateral_right, forward]
 ```
 
-## 12. 接入其他端到端算法
-
-复制 UniAD 声明：
-
-```bash
-cp configs/adapters/uniad.yaml configs/adapters/my_planner.yaml
-```
-
-修改其中的 `launcher`、`observation` 和 `output` 后运行：
+`AdapterSpec.render_args()` 替换启动参数，`launch_adapter()` 应用 `cwd` 和 `env`。运行命令：
 
 ```bash
 python scripts/closed_loop.py \
   --scenario configs/scenarios/nuscenes_0383.yaml \
+  --base configs/base.yaml \
   --camera configs/cameras/nuscenes.yaml \
   --kinematic configs/kinematic.yaml \
-  --ad my_planner --ad_config configs/adapters/my_planner.yaml
+  --ad <planner> \
+  --ad_config configs/adapters/<planner>.yaml \
+  --ad_cuda 0
 ```
 
-当前 IPC 使用兼容 HUGSIM 的 `obs_pipe`/`plan_pipe` pickle 协议。算法轨迹
-定义为 `(右为正的横向距离, 前向距离)`；控制器会在执行前完成左右手坐标系
-和转向符号转换。
+开发适配器时不要添加 `--no_io_trace`。可在 `aether_results/nuscenes/<scene>/<planner>/limsim_camera/io_trace/step_*/raw.pkl` 查看每一步实际传输的输入与输出。
 
-## 目录结构
+## 输出文件
 
-```text
-aether/                    仿真、渲染、交通、传感器和算法适配器
-configs/                   相机、场景和算法声明
-scripts/                   下载、检查、训练和闭环入口
-tools/                     数据、地图和车辆资产工具
-third_party/drivestudio    三维重建与渲染后端
-third_party/difix3d        图像修复桥
-third_party/uniad_sim      UniAD 闭环适配器
-third_party/splatad_gsplat 点云光栅器
-data/                      下载的数据，不提交到 Git
-```
+| 文件 | 内容 |
+|---|---|
+| `limsim_aether.mp4` | LimSim 二维与 AETHER 六路相机同步视频 |
+| `video.mp4` | AETHER 六路相机视频 |
+| `data.pkl`, `infos.pkl` | 轨迹与逐步状态 |
+| `io_trace/` | 每一步的算法输入与输出 |
+| `refine_audit.json` | 六路 Difix 记录 |
+| `dynamic_removal_audit.json` | 原动态实例删除与外部槽位记录 |
+| `perf.json` | 运行耗时 |
 
-## 许可证与数据来源
+## 许可证
 
-AETHER 使用仓库中的许可证。第三方代码保留各自许可证，详见
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。nuScenes、3DRealCar、
-UniAD 权重、Difix 权重和 LimSim 均遵循其各自条款。发布的两辆车都由
-3DRealCar 序列转换而来，具体序列号记录在各资产的 `metadata.json` 中。
+AETHER 使用仓库许可证；第三方代码和数据沿用各自条款，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fast, GPU-free validation for downloaded AETHER demo data."""
+"""Validate downloaded AETHER demo data."""
 from __future__ import annotations
 
 import argparse
