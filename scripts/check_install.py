@@ -91,36 +91,16 @@ def main() -> int:
             "DIFIX3D_ROOT", ROOT / "third_party/difix3d")), False, "dir"),
     ])
 
-    scene_dir = ROOT / "data/pandaset/processed/095"
-    checkpoint_dir = (ROOT / "data/checkpoints/pandaset_outputs/scene_recon_full"
-                      / "scene_095_6cams_with_humans")
-    checks.extend([
-        path_check("095 checkpoint", checkpoint_dir / "checkpoint_final.pth", True, "file"),
-        path_check("095 checkpoint config", checkpoint_dir / "config.yaml", True, "file"),
-        path_check("095 ego poses", scene_dir / "ego_pose", True, "dir"),
-        path_check("095 ground parameters",
-                   ROOT / "data/exported_scenes/pandaset/pandaset_095_final/ground_param.pkl",
-                   True, "file"),
-    ])
-    missing_extrinsics = [
-        f"000_{index}.txt"
-        for index in range(6)
-        if not (scene_dir / "extrinsics" / f"000_{index}.txt").is_file()
-    ]
-    checks.append(Check(
-        "required", "095 camera extrinsics", not missing_extrinsics,
-        "000_0.txt ... 000_5.txt present" if not missing_extrinsics
-        else "missing: " + ", ".join(missing_extrinsics),
-    ))
-
     uniad_python = Path(os.environ.get("UNIAD_PYTHON", ROOT / ".conda/uniad/bin/python"))
     uniad_checkpoint = Path(os.environ.get(
         "UNIAD_CHECKPOINT", ROOT / "checkpoints/uniad_base_e2e.pth"))
     checks.extend([
         path_check("UniAD Python", uniad_python, False, "executable"),
         path_check("UniAD checkpoint", uniad_checkpoint, False, "file"),
-        path_check("Full processed 095 archive",
-                   ROOT / "assets/local/pandaset095_processed.zip", False, "file"),
+        path_check("nuScenes 0383 demo data",
+                   ROOT / "data/nuscenes/processed_10Hz/trainval/300", False, "dir"),
+        path_check("nuScenes 088 demo data",
+                   ROOT / "data/nuscenes/processed_10Hz/trainval/088", False, "dir"),
     ])
 
     sidecar = first_existing((

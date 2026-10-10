@@ -1,314 +1,179 @@
 # AETHER
 
-[中文](README_ZH.md)
+[中文说明](README_ZH.md)
 
-AETHER is an editable driving-scene pipeline built around 3D Gaussian
-Splatting (3DGS). It reconstructs scenes, edits actors, synthesizes RGB and
-point-cloud novel views, and connects enhanced multimodal observations to
-closed-loop driving and diagnosis.
+AETHER is an editable 3D Gaussian driving simulator. It reconstructs driving
+scenes, replaces their dynamic foreground with external vehicle assets, lets
+LimSim control background traffic, repairs all six camera views with Difix,
+and runs an end-to-end planner such as UniAD in a closed loop.
 
-## Features
-- 3DGS scene reconstruction from processed driving data.
-- Scenario editing with actor placement, replay, and termination settings.
-- RGB and point-cloud novel-view synthesis.
-- Mode-A geometric LiDAR from configured scene geometry.
-- Phase-B SplatAD LiDAR range, intensity, and ray-drop prediction.
-- Difix RGB enhancement in the main environment.
-- Multimodal RGB-LiDAR closed-loop rollout and corpus generation.
-- Reverse distillation from enhanced closed-loop observations.
-- UniAD end-to-end closed-loop driving.
-- Semantic-causal algorithm diagnosis with mock and real rollouts.
+## What is included
 
-## Core layout
+- DriveStudio-based 3D scene reconstruction and novel-view rendering.
+- Camera and Gaussian point-cloud simulation.
+- Scene editing: remove, restore, replace, and place dynamic actors.
+- Portable Gaussian vehicle assets converted from 3DRealCar.
+- LimSim traffic on nuScenes HD-map topology.
+- A generic end-to-end adapter plus a ready-to-run UniAD adapter.
+- Mandatory six-camera Difix repair before every planner input.
+- A synchronized `LimSim 2D | AETHER 3D` result video and audit files.
+
+The public evaluation-protocol and algorithm-diagnosis experiments are not
+part of this release.
+
+## Tested minimum loop
+
 ```text
-aether/                 Core rendering, training, refinement, and diagnosis
-configs/                Base, camera, scenario, adapter, and registry configs
-scripts/                Installation checks and executable pipelines
-tools/                  Data and scene utilities
-third_party/drivestudio RGB 3DGS reconstruction runtime
-third_party/splatad_gsplat
-                        SplatAD LiDAR rasterizer
-third_party/difix3d     Difix RGB integration
-third_party/uniad_sim   UniAD closed-loop adapter
-data/                   Processed data and RGB checkpoints
-assets/local/           Optional local processed archives
-outputs/                Training, visualization, and distillation outputs
-aether_results/         Closed-loop rollouts and evaluation inputs
+nuScenes reconstruction + HD map
+        -> remove original dynamic foreground
+        -> LimSim traffic poses
+        -> 3DRealCar Gaussian vehicles
+        -> six AETHER cameras
+        -> six-view Difix repair
+        -> UniAD trajectory
+        -> ego update and next frame
 ```
 
-## 1. Main environment
+Two complete examples are provided:
 
-Run every command from the repository root. Use one `aether` environment for
-RGB reconstruction, Difix, LiDAR, visualization, distillation, and diagnosis.
+| Scene | DriveStudio index | Frames | HD-map traffic |
+|---|---:|---:|---|
+| nuScenes `scene-0383` | `300` | `39` | LimSim |
+| nuScenes `scene-0088` | `88` | `39` | LimSim |
+
+The Hugging Face dataset also retains `data.zip` for PandaSet 095. PandaSet
+095 has no HD-map package here, so it supports reconstruction/direct closed
+loop but not the provided LimSim topology loop.
+
+## 1. Clone
 
 ```bash
-conda create -n aether python=3.10 -y
-conda activate aether
+git clone https://github.com/siyingli99/Aether.git
+cd Aether
 ```
 
-Install PyTorch for CUDA 12.8, then the Python dependencies:
+All following commands run from the repository root on Ubuntu/WSL2.
+
+## 2. Create the AETHER environment
+
+```bash
+conda create -p .conda/aether python=3.10 -y
+conda activate ./.conda/aether
+```
+
+Install the tested CUDA 12.8 PyTorch stack:
 
 ```bash
 pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
   --index-url https://download.pytorch.org/whl/cu128
-pip install -r requirements.txt
 ```
 
-Install the RGB rendering dependencies:
+Install AETHER and rendering dependencies:
 
 ```bash
+pip install -r requirements.txt
 pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.3.0
 pip install git+https://github.com/NVlabs/nvdiffrast.git
-pip install git+https://github.com/facebookresearch/pytorch3d.git
 pip install -e third_party/drivestudio/third_party/smplx
 ```
 
-Difix runs directly in `aether`; its Python packages are included in
-`requirements.txt`.
+The SplatAD rasterizer is vendored and imported directly. Point-cloud
+simulation compiles its CUDA extension on first use; no separate SplatAD
+install command is required.
 
-The SplatAD CUDA extension is loaded from `third_party/splatad_gsplat`. Its
-kernels are JIT-compiled on first use, so the first LiDAR command takes longer.
-Keep `nvcc` and `ninja` available:
+Verify the code environment:
 
 ```bash
-conda install -n aether -c conda-forge ninja -y
+python scripts/check_install.py
 ```
 
-## 2. Data preparation
-The minimum scene-095 runtime layout is:
+## 3. Download the demo data
+
+The demo repository is `mikkochi/AETHER_Demo` on Hugging Face. Log in once if
+the repository is private:
+
+```bash
+huggingface-cli login
+```
+
+Download both nuScenes scenes and both 3DRealCar assets. The script verifies
+every archive before extracting it into the expected `data/` layout:
+
+```bash
+python scripts/download_demo.py --scene all
+```
+
+Download only scene 0383 plus the vehicle assets:
+
+```bash
+python scripts/download_demo.py --scene 0383
+```
+
+Validate the extracted scene without loading CUDA kernels:
+
+```bash
+python scripts/check_demo.py --scene 0383
+```
+
+The resulting layout is:
 
 ```text
 data/
-├── checkpoints/pandaset_outputs/scene_recon_full/
-│   └── scene_095_6cams_with_humans/
-│       ├── checkpoint_final.pth
-│       └── config.yaml
-├── pandaset/processed/095/
-│   ├── ego_pose/
-│   └── extrinsics/
-└── exported_scenes/pandaset/pandaset_095_final/
-    └── ground_param.pkl
+├── checkpoints/nuscenes_outputs/scene_recon_full/
+│   ├── scene_300_6cams_with_humans/
+│   └── scene_88_6cams_with_humans/
+├── nuscenes/processed_10Hz/trainval/{300,088}/
+├── limsim/nuscenes_{0383,088}/
+└── assets/vehicles/
+    ├── 3drealcar_2024_06_04_15_34_51/
+    └── 3drealcar_2024_06_04_13_44_39/
 ```
 
-After placing these assets, run `python scripts/check_install.py`.
+Both vehicle assets are converted directly from the named
+[3DRealCar](https://xiaobiaodu.github.io/3drealcar/) sequences. Neither asset
+is extracted from the nuScenes reconstructions.
 
-For the complete processed scene-095 ZIP, place
-`pandaset095_processed.zip` under `assets/local/`, then extract it:
+## 4. Install the AETHER LimSim bridge
+
+LimSim remains a separate GPL-3.0 process. Clone the tested integration branch
+next to AETHER:
 
 ```bash
-python scripts/extract_pandaset095.py \
-  --archive assets/local/pandaset095_processed.zip \
-  --destination data/pandaset/processed
+git clone --branch aether-integration \
+  https://github.com/siyingli99/LimSim.git ../LimSim
 ```
 
-Optional: download the complete PandaSet archive with Kaggle:
+Create its isolated environment:
 
 ```bash
-pip install kaggle
-mkdir -p data/pandaset/raw
-kaggle datasets download pz19930809/pandaset -p data/pandaset/raw
-unzip data/pandaset/raw/pandaset-dataset.zip -d data/pandaset/raw
+conda create -p .conda/limsim python=3.10 -y
+conda run -p .conda/limsim \
+  pip install -r ../LimSim/aether_bridge/requirements.txt
 ```
 
-Install the vendored PandaSet toolkit and preprocess only scene 095:
+The runner starts and stops the headless LimSim/SUMO sidecar automatically.
 
-```bash
-pip install -e third_party/drivestudio/pandaset-devkit/python
-python third_party/drivestudio/datasets/preprocess.py \
-  --data_root data/pandaset/raw --dataset pandaset \
-  --target_dir data/pandaset/processed --workers 32 \
-  --scene_ids 95 \
-  --process_keys images lidar calib pose dynamic_masks objects
-```
+## 5. Install UniAD
 
-## 3. RGB smoke test
-This renders one frame from the default RGB checkpoint:
-
-```bash
-python scripts/render_smoke_test.py \
-  --scenario configs/scenarios/pandaset_095_example.yaml \
-  --base configs/base.yaml --camera configs/cameras/pandaset.yaml \
-  --kinematic configs/kinematic.yaml \
-  --frame 0 --out outputs/smoke.png
-```
-
-## 4. Scenario editor
-Open the BEV editor:
-
-```bash
-python -m aether.tools.scenario_editor \
-  configs/scenarios/pandaset_095_example.yaml
-```
-
-Save the edited scenario from the editor, then pass its YAML to smoke,
-closed-loop, or diagnosis commands.
-
-## 5. Phase A: RGB 3DGS reconstruction
-Full processed scene data is required. The wrapper forwards remaining
-OmegaConf overrides to DriveStudio:
-
-```bash
-python scripts/train_scene.py \
-  --config_file third_party/drivestudio/configs/omnire.yaml \
-  --output_root data/checkpoints/pandaset_outputs \
-  --project scene_recon_full \
-  --run_name scene_095_6cams_with_humans \
-  dataset=pandaset/6cams \
-  data.data_root=data/pandaset/processed \
-  data.scene_idx=95
-```
-
-The final checkpoint is
-`data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth`.
-
-## 6. Phase B: frozen-geometry SplatAD LiDAR
-Use the default scene-095 RGB checkpoint and freeze RGB geometry:
-
-```bash
-python aether/train/joint_phase.py \
-  --config_file third_party/drivestudio/configs/omnire.yaml \
-  --resume_from data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth \
-  --output_root outputs/dualmodal \
-  --project aether_joint/pandaset --run_name scene095_joint \
-  --num_iters 10000 --freeze_geometry \
-  dataset=pandaset/6cams \
-  data.data_root=data/pandaset/processed data.scene_idx=95
-```
-
-The final convenience alias matches `configs/refine/scene_registry.yaml`:
-`outputs/dualmodal/aether_joint/pandaset/scene095_joint/lidar_sidecar_frozen.pt`.
-
-Frozen Phase B keeps the original RGB checkpoint for RGB rendering. The
-sidecar stores only the LiDAR head and per-Gaussian LiDAR attributes.
-Make that RGB checkpoint available under the registry joint directory:
-
-```bash
-cp data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth \
-  outputs/dualmodal/aether_joint/pandaset/scene095_joint/checkpoint_final.pth
-```
-
-## 7. LiDAR refiner v2
-Run this only after the Phase-B sidecar exists. The registry reads the joint
-directory at `outputs/dualmodal/aether_joint/pandaset/scene095_joint`.
-
-```bash
-bash scripts/run_lidar_refiner_v2_pipeline.sh all
-```
-
-The four stages generate real-render pairs, merge manifests, and train the
-refiner. The final bundle is
-`outputs/multimodal_refine_v2/unified/unified_multimodal.bundle.pth`.
-
-## 8. Novel-view RGB and point-cloud visualization
-Use the original RGB checkpoint with the frozen sidecar.
-
-Render one RGB/LiDAR comparison:
-
-```bash
-python aether/tools/viz_joint.py \
-  --resume_from data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth \
-  --lidar_sidecar outputs/dualmodal/aether_joint/pandaset/scene095_joint/lidar_sidecar_frozen.pt \
-  --frame_idx 0 --cam_idx 0 \
-  --out_png outputs/pandaset095_joint.png
-```
-
-Render six-camera RGB, projected point clouds, BEV, and comparison videos:
-
-```bash
-python aether/tools/viz_joint_video.py \
-  --resume_from data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth \
-  --lidar_sidecar outputs/dualmodal/aether_joint/pandaset/scene095_joint/lidar_sidecar_frozen.pt \
-  --out_dir outputs/pandaset095_joint_video \
-  --scene_tag "PandaSet 095" --fps 10
-```
-
-## 9. Multimodal closed loop
-Run without an end-to-end planner by setting `--ad none`. The command applies
-the Phase-B sidecar and LiDAR refiner bundle while following a built-in
-straight trajectory:
-
-```bash
-python scripts/closed_loop_multimodal.py \
-  --scenario configs/scenarios/pandaset_095_multimodal.yaml \
-  --base configs/base.yaml --camera configs/cameras/pandaset_800x450.yaml \
-  --kinematic configs/kinematic.yaml --ad none \
-  --lidar_sidecar outputs/dualmodal/aether_joint/pandaset/scene095_joint/lidar_sidecar_frozen.pt \
-  --lidar_bundle outputs/multimodal_refine_v2/unified/unified_multimodal.bundle.pth \
-  --max_steps 12
-```
-
-The output directory is
-`aether_results/pandaset/pandaset_095_multimodal/none_multimodal/easy/`.
-
-It contains `camera_trajectory.json`, videos, panels, and `distill_corpus/`
-with enhanced RGB and LiDAR observations.
-
-## 10. Reverse distillation
-Use the rollout directory produced by the previous command:
-
-```bash
-python aether/refine/distill_from_closed_loop.py \
-  --closed_loop_dir aether_results/pandaset/pandaset_095_multimodal/none_multimodal/easy \
-  --joint_dir outputs/dualmodal/aether_joint/pandaset/scene095_joint \
-  --lidar_sidecar outputs/dualmodal/aether_joint/pandaset/scene095_joint/lidar_sidecar_frozen.pt \
-  --refiner_bundle outputs/multimodal_refine_v2/unified/unified_multimodal.bundle.pth \
-  --out outputs/distilled/pandaset095
-```
-
-This writes `background_distilled.pth`, `sidecar_distilled.pt`, and
-`distill_meta.json`. Re-render the trajectory with the distilled artifacts:
-
-```bash
-python scripts/render_distilled_trajectory.py \
-  --trajectory aether_results/pandaset/pandaset_095_multimodal/none_multimodal/easy/camera_trajectory.json \
-  --joint_dir outputs/dualmodal/aether_joint/pandaset/scene095_joint \
-  --distill_dir outputs/distilled/pandaset095 \
-  --closed_loop_dir aether_results/pandaset/pandaset_095_multimodal/none_multimodal/easy \
-  --out outputs/distilled/pandaset095/replay
-```
-
-## 11. Algorithm diagnosis
-Run the self-contained mock diagnosis first:
-
-```bash
-python scripts/diagnose.py \
-  --mock --output outputs/diagnosis/mock_report.json
-```
-
-Run diagnosis against the real UniAD adapter after installing it:
-
-```bash
-python scripts/diagnose.py \
-  --scenario configs/scenarios/pandaset_095_aether.yaml \
-  --base configs/base.yaml --camera configs/cameras/pandaset_800x450.yaml \
-  --kinematic configs/kinematic.yaml \
-  --ad uniad --ad_cuda 0 \
-  --output outputs/diagnosis/pandaset095_uniad.json
-```
-
-## 12. UniAD environment and closed loop
-UniAD is the only maintained end-to-end driving adapter. It uses the separate
-prefix environment expected by `third_party/uniad_sim/tools/e2e.sh`.
+Create a separate legacy OpenMMLab environment:
 
 ```bash
 conda create -p .conda/uniad python=3.10 -y
 conda activate ./.conda/uniad
 ```
 
-Install PyTorch and the OpenMMLab stack:
+Install the UniAD runtime:
 
 ```bash
 pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
   --index-url https://download.pytorch.org/whl/cu128
 pip install openmim
-MMCV_WITH_OPS=1 pip install -v "mmcv-full==1.7.2"
-pip install "mmdet==2.26.0"
-pip install "mmdet3d==1.0.0rc6"
-pip install "mmsegmentation==0.29.1"
+MMCV_WITH_OPS=1 pip install -v mmcv-full==1.7.2
+pip install mmdet==2.26.0 mmdet3d==1.0.0rc6 mmsegmentation==0.29.1
 pip install -r third_party/uniad_sim/requirements.txt
 ```
 
-Download the official v1.0.1 end-to-end checkpoint:
+Download the official UniAD end-to-end checkpoint:
 
 ```bash
 mkdir -p checkpoints
@@ -316,32 +181,200 @@ wget -O checkpoints/uniad_base_e2e.pth \
   https://github.com/OpenDriveLab/UniAD/releases/download/v1.0.1/uniad_base_e2e.pth
 ```
 
-Return to the main environment and run the closed loop:
+Return to AETHER:
 
 ```bash
-conda activate aether
+conda activate ./.conda/aether
+```
+
+## 6. Run a four-step smoke loop
+
+Scene 0383:
+
+```bash
+AETHER_SCENARIO=configs/scenarios/nuscenes_0383_smoke.yaml \
+  bash scripts/run_closed_loop.sh 0383 --no_io_trace --refine_max_side 512
+```
+
+Scene 088:
+
+```bash
+AETHER_SCENARIO=configs/scenarios/nuscenes_088_smoke.yaml \
+  bash scripts/run_closed_loop.sh 088 --no_io_trace --refine_max_side 512
+```
+
+Do not pass `--no_refine`: these scenarios fail closed if any camera misses
+Difix repair.
+
+## 7. Run the full loop
+
+```bash
+bash scripts/run_closed_loop.sh 0383 --no_io_trace
+```
+
+Use another CUDA device for AETHER/UniAD/Difix:
+
+```bash
+AETHER_CUDA=1 bash scripts/run_closed_loop.sh 0383 --no_io_trace
+```
+
+Important outputs are written below
+`aether_results/nuscenes/<scenario>/uniad/limsim_camera/`:
+
+```text
+limsim_aether.mp4          synchronized full-map 2D and six-camera 3D video
+video.mp4                  six-camera AETHER video
+data.pkl                   closed-loop trajectory
+refine_audit.json          per-frame/per-camera Difix hashes
+dynamic_removal_audit.json removed original foreground and external slots
+perf.json                  timing and invariant summary
+```
+
+## 8. Tune the loop
+
+Copy a scenario before changing it:
+
+```bash
+cp configs/scenarios/nuscenes_0383.yaml configs/scenarios/my_scene.yaml
+```
+
+Select the second 3DRealCar vehicle:
+
+```yaml
+traffic:
+  asset_path: ${aether:data/assets/vehicles/3drealcar_2024_06_04_13_44_39}
+```
+
+Change traffic density and Gaussian cost:
+
+```yaml
+traffic:
+  max_vehicles: 6
+  max_gaussians: 30000
+```
+
+Change loop length and road-departure tolerance:
+
+```yaml
+termination:
+  max_steps: 80
+  off_scene_radius: 6.0
+  off_scene_streak: 5
+```
+
+Tune Difix speed/quality from the command line:
+
+```bash
+bash scripts/run_closed_loop.sh 0383 \
+  --refine_max_side 768 --refine_timestep 199 --refine_dtype bf16
+```
+
+## 9. Reconstruct a new scene
+
+Preprocess nuScenes with the vendored DriveStudio tools, then launch training.
+The `scene-0383` sample is DriveStudio index `300`:
+
+```bash
+python scripts/train_scene.py \
+  --config_file third_party/drivestudio/configs/omnire.yaml \
+  --output_root data/checkpoints/nuscenes_outputs \
+  --project scene_recon_full \
+  --run_name scene_300_6cams_with_humans \
+  dataset=nuscenes/6cams \
+  data.data_root=data/nuscenes/processed_10Hz/trainval \
+  data.scene_idx=300
+```
+
+The wrapper forwards additional OmegaConf overrides directly to DriveStudio.
+
+## 10. Point-cloud simulation
+
+Train a frozen-geometry SplatAD sidecar from an RGB checkpoint:
+
+```bash
+python aether/train/joint_phase.py \
+  --config_file third_party/drivestudio/configs/omnire.yaml \
+  --resume_from data/checkpoints/nuscenes_outputs/scene_recon_full/scene_300_6cams_with_humans/checkpoint_final.pth \
+  --output_root outputs/dualmodal --project aether_joint/nuscenes \
+  --run_name scene300_joint --num_iters 10000 --freeze_geometry \
+  dataset=nuscenes/6cams \
+  data.data_root=data/nuscenes/processed_10Hz/trainval data.scene_idx=300
+```
+
+Render RGB, projected points, and BEV from the sidecar:
+
+```bash
+python aether/tools/viz_joint.py \
+  --resume_from data/checkpoints/nuscenes_outputs/scene_recon_full/scene_300_6cams_with_humans/checkpoint_final.pth \
+  --lidar_sidecar outputs/dualmodal/aether_joint/nuscenes/scene300_joint/lidar_sidecar_frozen.pt \
+  --frame_idx 0 --cam_idx 0 --out_png outputs/nuscenes_0383_lidar.png
+```
+
+The camera-only LimSim examples intentionally keep `lidar.enabled: false`.
+
+## 11. Scene editing and external assets
+
+Convert any reconstructed 3DRealCar sequence (`gs.pth` + `wlh.json`) to the
+portable AETHER format:
+
+```bash
+python tools/build_vehicle_asset.py \
+  --input /path/to/3DRealCar/<sequence> \
+  --output data/assets/vehicles/<name> \
+  --sequence-id <sequence> --max-gaussians 50000
+```
+
+Original dynamic `RigidNodes`, `DeformableNodes`, and `SMPLNodes` are hidden
+when `traffic.hide_original_dynamic: true`. AETHER then appends reusable
+vehicle slots and updates their poses from LimSim at every timestamp. The
+audit file proves that the old actors remained hidden throughout the loop.
+
+Open the YAML/BEV scene editor for manually scripted scenarios:
+
+```bash
+python -m aether.tools.scenario_editor configs/scenarios/nuscenes_0383.yaml
+```
+
+## 12. Add another end-to-end algorithm
+
+Copy the UniAD adapter declaration:
+
+```bash
+cp configs/adapters/uniad.yaml configs/adapters/my_planner.yaml
+```
+
+Edit `launcher`, `observation`, and `output`, then run:
+
+```bash
 python scripts/closed_loop.py \
-  --scenario configs/scenarios/pandaset_095_aether.yaml \
-  --base configs/base.yaml --camera configs/cameras/pandaset_800x450.yaml \
+  --scenario configs/scenarios/nuscenes_0383.yaml \
+  --camera configs/cameras/nuscenes.yaml \
   --kinematic configs/kinematic.yaml \
-  --ad uniad --ad_cuda 0
+  --ad my_planner --ad_config configs/adapters/my_planner.yaml
 ```
 
-The default output directory is
-`aether_results/pandaset/pandaset_095_aether/uniad/easy/`.
+The current IPC contract is HUGSIM-compatible pickle over `obs_pipe` and
+`plan_pipe`. Planner waypoints are `(lateral_right, forward)`; the controller
+performs the required right/left-handed conversion before applying steering.
 
-## 13. Output evaluation
-`aether_eval.py` accepts a rollout containing `data.pkl`, a comma-separated
-metric list, and an optional JSON output:
+## Repository layout
 
-```bash
-python scripts/aether_eval.py \
-  aether_results/pandaset/pandaset_095_aether/uniad/easy \
-  --metrics hugsim,navsim_pdms,bench2drive_ds \
-  --out outputs/pandaset095_eval.json
+```text
+aether/                  simulator, rendering, traffic, sensors, adapters
+configs/                 camera, scenario, and adapter declarations
+scripts/                 download, validation, training, and loop entrypoints
+tools/                   data/map/vehicle conversion tools
+third_party/drivestudio  3D reconstruction and rendering backend
+third_party/difix3d      in-loop image repair bridge
+third_party/uniad_sim    end-to-end planner adapter
+third_party/splatad_gsplat point-cloud rasterizer
+data/                    downloaded data; never committed to Git
 ```
 
-## Current default asset boundary
-Scene 095 includes the RGB checkpoint and the assets needed by Mode-A LiDAR.
-It does not include a Phase-B sidecar, LiDAR refiner bundle, or
-`distill_corpus`. Generate those artifacts with sections 6, 7, and 9.
+## Licenses and data
+
+AETHER is released under the repository license. Third-party code keeps its
+original license; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+nuScenes, 3DRealCar, UniAD weights, Difix weights, and LimSim are distributed
+under their respective terms. The two supplied vehicle assets are converted
+from the 3DRealCar sequences recorded in each asset's `metadata.json`.

@@ -52,7 +52,8 @@ class CameraSpec:
 class DriveStudioRenderer:
     """Inference-only wrapper around drivestudio's MultiTrainer."""
 
-    def __init__(self, ckpt_path: str | Path, device: str = "cuda"):
+    def __init__(self, ckpt_path: str | Path, device: str = "cuda",
+                 excluded_model_classes: tuple[str, ...] = ()):
         import os
         from utils.misc import import_str  # drivestudio util
         from aether.paths import DRIVESTUDIO_ROOT
@@ -77,9 +78,18 @@ class DriveStudioRenderer:
             )
         self.cfg: DictConfig = OmegaConf.load(cfg_path)
 
+        # Public camera-only editing scenarios remove original human actors
+        # before rendering.  Excluding SMPLNodes here also avoids requiring
+        # the separately licensed SMPL_NEUTRAL.pkl just to discard them.
+        excluded = tuple(dict.fromkeys(str(name) for name in excluded_model_classes))
+        for class_name in excluded:
+            if class_name in self.cfg.model:
+                del self.cfg.model[class_name]
+
         # Recover the per-checkpoint metadata that the trainer constructor
         # would normally get from a DrivingDataset.
-        meta = self._extract_metadata(ckpt_path)
+        meta = self._extract_metadata(ckpt_path, excluded)
+        self.excluded_dynamic_counts = meta.pop("excluded_dynamic_counts")
         self._frame_count = meta["num_timesteps"]
         self._image_count_full = meta["num_full_images"]
         self._image_count_train = meta["num_train_images"]
@@ -110,11 +120,19 @@ class DriveStudioRenderer:
     # ------------------------------------------------------------------ #
     # Construction helpers
     # ------------------------------------------------------------------ #
-    def _extract_metadata(self, ckpt_path: Path) -> Dict[str, Any]:
+    def _extract_metadata(self, ckpt_path: Path,
+                          excluded_model_classes: tuple[str, ...] = ()) -> Dict[str, Any]:
         """Pull num_timesteps / num_*_images / scene_aabb out of the
         checkpoint's stored module states without touching raw data on disk."""
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         models = ckpt["models"]
+        excluded_dynamic_counts: dict[str, int] = {}
+        for class_name in excluded_model_classes:
+            visibility = models.get(class_name, {}).get("instances_fv")
+            excluded_dynamic_counts[class_name] = (
+                int(visibility.any(dim=0).sum().item())
+                if visibility is not None and visibility.ndim == 2 else 0
+            )
 
         # Time count: RigidNodes.instances_quats.shape[0] is the per-frame
         # buffer.  Fallback: SMPLNodes / DeformableNodes have the same.
@@ -159,6 +177,7 @@ class DriveStudioRenderer:
             num_train_images=num_full_images,   # we treat all images as train (no eval split at inference)
             test_set_indices=[],
             scene_aabb=scene_aabb,
+            excluded_dynamic_counts=excluded_dynamic_counts,
         )
 
     @property
@@ -181,7 +200,7 @@ class DriveStudioRenderer:
     def clear_actor_overrides(self) -> None:
         self._actor_overrides.clear()
 
-    def _apply_overrides(self, frame_idx: int) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+    def _apply_overrides(self, frame_idx: int) -> Dict[str, Tuple[torch.Tensor, ...]]:
         """Patch instances_trans / instances_quats in-place at `frame_idx`.
 
         Returns a snapshot (per class) of the original tensor slices so the
@@ -199,10 +218,13 @@ class DriveStudioRenderer:
             if inst >= model.instances_trans.shape[1]:
                 continue
             if cls not in snapshot:
-                snapshot[cls] = (
+                values = [
                     model.instances_trans[frame_idx].detach().clone(),
                     model.instances_quats[frame_idx].detach().clone(),
-                )
+                ]
+                if hasattr(model, "instances_fv"):
+                    values.append(model.instances_fv[frame_idx].detach().clone())
+                snapshot[cls] = tuple(values)
             t = pose[:3, 3]
             R = pose[:3, :3].cpu().numpy()
             q_xyzw = SCR.from_matrix(R).as_quat().astype(np.float32)
@@ -216,12 +238,15 @@ class DriveStudioRenderer:
         return snapshot
 
     def _restore_overrides(self, frame_idx: int,
-                           snapshot: Dict[str, Tuple[torch.Tensor, torch.Tensor]]) -> None:
-        for cls, (orig_t, orig_q) in snapshot.items():
+                           snapshot: Dict[str, Tuple[torch.Tensor, ...]]) -> None:
+        for cls, values in snapshot.items():
+            orig_t, orig_q = values[:2]
             model = self.trainer.models[cls]
             with torch.no_grad():
                 model.instances_trans[frame_idx].copy_(orig_t)
                 model.instances_quats[frame_idx].copy_(orig_q)
+                if len(values) == 3:
+                    model.instances_fv[frame_idx].copy_(values[2])
 
     # ------------------------------------------------------------------ #
     # Core render

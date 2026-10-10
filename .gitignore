@@ -25,6 +25,7 @@ runs/
 wandb/
 tensorboard/
 aether_smoke/
+aether_results/
 paper_exp/outputs/
 paper_exp/results/
 
@@ -38,6 +39,7 @@ checkpoints/
 weights/
 
 # Local/private archives
+data.zip
 assets/local/
 assets/local/*.zip
 !assets/README.md
@@ -65,6 +67,14 @@ lidar_pairs/
 *.pickle
 !third_party/uniad_sim/data/**/*.pkl
 reports/
+
+# Superseded local integration prototypes
+tess_bridge/
+configs/scenarios/nuscenes_scene*.yaml
+configs/scenarios/traffic/
+scripts/run_scene*.sh
+tools/export_nuscenes_tess_map.py
+docs/LIMSIM_CLOSED_LOOP.md
 
 # OS/temp
 .DS_Store

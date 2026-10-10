@@ -50,26 +50,17 @@ def _resolve_output_dir(cfg, ad):
     return os.path.join(root, dataset, scene, f"{ad}_multimodal", mode)
 
 
-# See closed_loop.py: AETHER's _ego_pose_ds render handedness is mirrored vs
-# HUGSIM's traj2control, so negate the plan's lateral column (col 0) to keep
-# AD plan direction and executed direction consistent. False to A/B test.
-FLIP_PLAN_LATERAL = True
-
-
 def _traj_to_action(plan_traj, info):
     from aether.control.ilqr.lqr import plan2control
     plan_traj = np.asarray(plan_traj, dtype=float).copy()
-    if FLIP_PLAN_LATERAL:
-        plan_traj[:, 0] = -plan_traj[:, 0]
     stats = np.zeros((plan_traj.shape[0] + 1, 5))
-    stats[1:, :2] = plan_traj[:, [1, 0]]
-    prev_a = 0.0
-    prev_b = 0.0
-    for i, (a, b) in enumerate(plan_traj):
-        da = (a - prev_a) if (a - prev_a) != 0 else 1e-6
-        stats[i + 1, 2] = np.arctan((b - prev_b) / da)
-    curr = np.array([0, 0, 0, info["ego_velo"], info["ego_steer"]])
-    return plan2control(stats, curr)
+    stats[1:, 0] = plan_traj[:, 1]
+    stats[1:, 1] = -plan_traj[:, 0]
+    deltas = np.diff(stats[:, :2], axis=0)
+    stats[1:, 2] = np.unwrap(np.arctan2(deltas[:, 1], deltas[:, 0]))
+    curr = np.array([0, 0, 0, info["ego_velo"], -info["ego_steer"]])
+    acc, steer_rate_left = plan2control(stats, curr)
+    return acc, -steer_rate_left
 
 
 def _front_cam_name(env):

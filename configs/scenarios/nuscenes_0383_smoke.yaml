@@ -1,0 +1,4 @@
+extends: nuscenes_0383.yaml
+scene_name: nuscenes_0383_smoke
+termination:
+  max_steps: 4

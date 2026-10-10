@@ -1,5 +1,5 @@
 """Function: Run an AETHER closed-loop simulation with a UniAD driving policy.
-Input/Output: Reads scenario, renderer, camera, and kinematic configs; writes trajectory, sensor, and evaluation artifacts.
+Input/Output: Reads scenario, renderer, camera, and kinematic configs; writes trajectory, sensor, video, and audit artifacts.
 Example:
     python scripts/closed_loop.py --scenario configs/scenarios/pandaset_095_aether.yaml \
         --base configs/base.yaml --camera configs/cameras/pandaset_800x450.yaml \
@@ -8,6 +8,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pickle
@@ -27,6 +28,7 @@ if _PY_BIN and _PY_BIN not in os.environ.get("PATH", ""):
 
 import numpy as np
 from moviepy import ImageSequenceClip
+from PIL import Image, ImageDraw, ImageFont
 
 import aether  # noqa: F401  (sets sys.path for drivestudio + hugsim)
 from aether.config import load_cfg
@@ -58,36 +60,25 @@ def _ad_path(cfg, ad: str) -> str:
     return p
 
 
-# AETHER's DriveStudio ego-pose map (`_ego_pose_ds`) renders yaw with the
-# OPPOSITE handedness to HUGSIM's `rt2pose`, from which the shared iLQR
-# `traj2control` was copied verbatim.  The net effect is a left/right flip
-# between what the AD plans (in the rendered image frame) and what the ego
-# actually executes.  We cancel it by negating the plan's lateral column
-# (col 0 = lateral, right+; col 1 = forward) before control conversion.
-# Set to False to A/B against the un-flipped behaviour.
-FLIP_PLAN_LATERAL = True
-
-
 def _trajectory_states(plan_traj):
-    """Convert lateral/forward waypoints to iLQR states."""
+    """Convert UniAD waypoints to canonical iLQR states.
+
+    UniAD/HUGSIM emits ``(lateral_right, forward)``.  The iLQR bicycle model
+    uses the conventional right-handed plane ``(forward, lateral_left)`` and
+    a counter-clockwise-positive heading, so both the axis order and the
+    lateral sign must be converted explicitly.
+    """
     plan_traj = np.asarray(plan_traj, dtype=float).copy()
     if plan_traj.ndim != 2 or plan_traj.shape[1] < 2 or not len(plan_traj):
         raise ValueError(f"expected non-empty Nx2 trajectory, got {plan_traj.shape}")
     plan_traj = plan_traj[:, :2]
     if not np.isfinite(plan_traj).all():
         raise ValueError("trajectory contains non-finite values")
-    if FLIP_PLAN_LATERAL:
-        plan_traj[:, 0] = -plan_traj[:, 0]
     plan_traj_stats = np.zeros((plan_traj.shape[0] + 1, 5))
-    plan_traj_stats[1:, :2] = plan_traj[:, [1, 0]]
-    prev_a, prev_b = 0.0, 0.0
-    for i, (a, b) in enumerate(plan_traj):
-        da = a - prev_a
-        db = b - prev_b
-        plan_traj_stats[i + 1, 2] = np.arctan(
-            db / (da if da != 0.0 else 1e-6)
-        )
-        prev_a, prev_b = a, b
+    plan_traj_stats[1:, 0] = plan_traj[:, 1]   # forward
+    plan_traj_stats[1:, 1] = -plan_traj[:, 0]  # left = -right
+    deltas = np.diff(plan_traj_stats[:, :2], axis=0)
+    plan_traj_stats[1:, 2] = np.unwrap(np.arctan2(deltas[:, 1], deltas[:, 0]))
     return plan_traj_stats
 
 
@@ -101,28 +92,78 @@ def _traj_to_action(plan_traj, info):
     from aether.control.ilqr.lqr import plan2control
 
     plan_traj_stats = _trajectory_states(plan_traj)
-    curr_stat = np.array([0, 0, 0, info["ego_velo"], info["ego_steer"]])
-    acc, steer_rate = plan2control(plan_traj_stats, curr_stat)
-    return acc, steer_rate
+    # iLQR steering is positive to the left.  BicycleEgo preserves HUGSIM's
+    # opposite convention (positive to the right), so convert both the
+    # current steering state and returned steering-rate command.
+    curr_stat = np.array([0, 0, 0, info["ego_velo"], -info["ego_steer"]])
+    acc, steer_rate_left = plan2control(plan_traj_stats, curr_stat)
+    return acc, -steer_rate_left
+
+
+def _camera_grid(obs):
+    """Compose the six nuScenes cameras in their physical surround layout."""
+    cams = list(obs.keys())
+    # 6-cam grid layout if available, else single-cam strip
+    front = ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT"]
+    back  = ["CAM_BACK_LEFT",  "CAM_BACK",  "CAM_BACK_RIGHT"]
+    use_grid = all(c in cams for c in front + back)
+    if use_grid:
+        row1 = np.concatenate([obs[c] for c in front], axis=1)
+        row2 = np.concatenate([obs[c] for c in back],  axis=1)
+        return np.concatenate([row1, row2], axis=0)
+    return np.concatenate([obs[c] for c in cams], axis=1)
 
 
 def _to_video(observations, out_path, fps=4):
     if not observations:
         return
-    cams = list(observations[0].keys())
-    # 6-cam grid layout if available, else single-cam strip
-    front = ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT"]
-    back  = ["CAM_BACK_LEFT",  "CAM_BACK",  "CAM_BACK_RIGHT"]
-    use_grid = all(c in cams for c in front + back)
-    frames = []
-    for obs in observations:
-        if use_grid:
-            row1 = np.concatenate([obs[c] for c in front], axis=1)
-            row2 = np.concatenate([obs[c] for c in back],  axis=1)
-            frames.append(np.concatenate([row1, row2], axis=0))
-        else:
-            frames.append(np.concatenate([obs[c] for c in cams], axis=1))
+    frames = [_camera_grid(obs) for obs in observations]
     ImageSequenceClip(frames, fps=fps).write_videofile(out_path, logger=None)
+
+
+def _resize_to_height(frame, height):
+    if int(frame.shape[0]) == int(height):
+        return frame
+    width = max(1, int(round(frame.shape[1] * height / frame.shape[0])))
+    return np.asarray(Image.fromarray(frame).resize((width, int(height)), Image.Resampling.LANCZOS))
+
+
+def _label(frame, text):
+    image = Image.fromarray(frame)
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+    draw.rounded_rectangle((12, 10, 190, 38), radius=7, fill=(0, 0, 0),
+                           outline=(100, 110, 120))
+    draw.text((23, 19), text, font=font, fill=(255, 255, 255))
+    return np.asarray(image)
+
+
+def _to_composite_video(observations, traffic_frames, out_path, fps=4):
+    """Write synchronized LimSim-2D | AETHER-3D frames."""
+    if not observations:
+        return
+    if len(observations) != len(traffic_frames):
+        raise RuntimeError(
+            f"composite streams differ: cameras={len(observations)}, "
+            f"traffic={len(traffic_frames)}"
+        )
+    frames = []
+    for obs, traffic in zip(observations, traffic_frames):
+        camera = _label(_camera_grid(obs), "AETHER 3D / Difix")
+        traffic = _label(traffic, "LimSim 2D / HD map")
+        traffic = _resize_to_height(traffic, camera.shape[0])
+        frames.append(np.concatenate((traffic, camera), axis=1))
+    ImageSequenceClip(frames, fps=fps).write_videofile(out_path, logger=None)
+
+
+def _rgb_digest(value):
+    array = np.ascontiguousarray(value)
+    return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _write_json(path, value):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, ensure_ascii=False)
 
 
 def _save_io_trace(trace_dir, cnt, info, obs, plan_traj, acc, steer_rate):
@@ -253,6 +294,16 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
         ad_log_path: str | None = None) -> None:
     if perf is None:
         perf = PerfTimer()
+    difix_cfg = getattr(cfg.scenario, "difix", None)
+    difix_required = bool(getattr(difix_cfg, "required", False)) \
+        if difix_cfg is not None else False
+    expected_cameras = int(getattr(difix_cfg, "expected_cameras", 6)) \
+        if difix_cfg is not None else 6
+    if difix_required and not refine:
+        raise RuntimeError(
+            "this scenario requires Difix on every AD camera input; "
+            "remove --no_refine"
+        )
     t_wall0 = time.perf_counter()
     with perf.section("env_init"):
         env = AetherDrivingEnv(cfg, output_dir)
@@ -299,7 +350,9 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
               f" max_side={refine_max_side}, dtype={refine_dtype},"
               f" model={refine_model})")
 
-    obs_save, info_save, bev_save = [], [], []
+    obs_save, info_save, bev_save, traffic_save = [], [], [], []
+    refine_audit = []
+    refine_audit_path = os.path.join(output_dir, "refine_audit.json")
     save = {"type": "closeloop", "frames": []}
     step_timings = []  # per-step wall + breakdown for diffusion-overhead analysis
 
@@ -312,12 +365,65 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
         t_refine_ms = 0.0
         if difix is not None:
             t_r0 = time.perf_counter()
+            raw_rgb = {name: np.asarray(value) for name, value in obs["rgb"].items()}
+            audit_entry = {
+                "step": cnt,
+                "timestamp": float(info["timestamp"]),
+                "status": "failed",
+                "cameras": {},
+            }
             with perf.section("difix_refine"):
                 try:
-                    obs["rgb"] = difix.refine_obs_rgb(obs["rgb"])
+                    if len(raw_rgb) != expected_cameras:
+                        raise RuntimeError(
+                            f"expected {expected_cameras} camera inputs, got {len(raw_rgb)}"
+                        )
+                    refined = difix.refine_obs_rgb(raw_rgb)
+                    if set(refined) != set(raw_rgb):
+                        raise RuntimeError(
+                            f"Difix camera set changed: input={sorted(raw_rgb)}, "
+                            f"output={sorted(refined)}"
+                        )
+                    checked = {}
+                    for camera in sorted(raw_rgb):
+                        input_image = raw_rgb[camera]
+                        output_image = np.asarray(refined[camera])
+                        if output_image.shape != input_image.shape:
+                            raise RuntimeError(
+                                f"Difix shape mismatch for {camera}: "
+                                f"{input_image.shape} -> {output_image.shape}"
+                            )
+                        if output_image.dtype != np.uint8:
+                            raise RuntimeError(
+                                f"Difix output for {camera} must be uint8, "
+                                f"got {output_image.dtype}"
+                            )
+                        checked[camera] = output_image
+                        audit_entry["cameras"][camera] = {
+                            "shape": list(output_image.shape),
+                            "input_sha256": _rgb_digest(input_image),
+                            "output_sha256": _rgb_digest(output_image),
+                        }
+                    obs["rgb"] = checked
+                    audit_entry["status"] = "success"
                 except Exception as e:
+                    audit_entry["error"] = str(e)
+                    if difix_required:
+                        refine_audit.append(audit_entry)
+                        _write_json(refine_audit_path, refine_audit)
+                        try:
+                            difix.stop()
+                        finally:
+                            env.close()
+                        raise RuntimeError(
+                            f"mandatory Difix failed at step {cnt}; raw images "
+                            "were not sent to the AD adapter"
+                        ) from e
                     print(f"[difix] step {cnt}: refine failed ({e}); using raw")
             t_refine_ms = (time.perf_counter() - t_r0) * 1000.0
+            audit_entry["duration_ms"] = t_refine_ms
+            refine_audit.append(audit_entry)
+            _write_json(refine_audit_path, refine_audit)
         if splatad is not None:
             if cnt == 0:
                 print("[aether] first LiDAR-head render may JIT-compile CUDA kernels "
@@ -328,6 +434,11 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
                     obs["lidar"] = splatad.enhance_obs_lidar()
                 except Exception as e:
                     print(f"[splatad-lidar] step {cnt}: {e}; keeping depth-backproj")
+        if env._external_vehicle_pool is not None:
+            env._external_vehicle_pool.assert_original_dynamic_hidden()
+        traffic_frame = env.render_traffic_2d()
+        if traffic_frame is not None:
+            traffic_save.append(traffic_frame)
         obs_save.append(obs["rgb"])
         info_save.append(info)
 
@@ -413,6 +524,27 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
         except Exception as e:
             print(f"[difix] stop failed: {e}")
 
+    if difix_required:
+        failures = [entry for entry in refine_audit if entry.get("status") != "success"]
+        if failures or len(refine_audit) != len(obs_save):
+            env.close()
+            raise RuntimeError(
+                f"Difix audit incomplete: success={len(refine_audit) - len(failures)}, "
+                f"camera_inputs={len(obs_save)}, failures={len(failures)}"
+            )
+    _write_json(refine_audit_path, refine_audit)
+    _write_json(
+        os.path.join(output_dir, "dynamic_removal_audit.json"),
+        {
+            "status": "success",
+            "hidden_original_instances": dict(env._dynamic_removal_audit),
+            "external_asset_slots": len(
+                env._external_vehicle_pool.instance_ids
+                if env._external_vehicle_pool is not None else ()
+            ),
+        },
+    )
+
     # Notify adapter we're done.
     with open(obs_pipe, "wb") as p:
         p.write(pickle.dumps("Done", protocol=4))
@@ -423,6 +555,11 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
         pickle.dump(info_save, f)
     with perf.section("video_encode"):
         _to_video(obs_save, os.path.join(output_dir, "video.mp4"))
+        if traffic_save:
+            _to_composite_video(
+                obs_save, traffic_save,
+                os.path.join(output_dir, "limsim_aether.mp4"),
+            )
         if bev_save:
             ImageSequenceClip(bev_save, fps=4).write_videofile(
                 os.path.join(output_dir, "bev.mp4"), logger=None
@@ -438,6 +575,16 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
             "frames":   cnt,
             "obs_cameras_only": bool(getattr(env, "obs_cameras_only", True)),
             "skip_io_trace":    bool(skip_io_trace),
+            "difix": {
+                "required": difix_required,
+                "expected_cameras": expected_cameras,
+                "audited_inputs": len(refine_audit),
+                "successful_inputs": sum(
+                    entry.get("status") == "success" for entry in refine_audit
+                ),
+            },
+            "dynamic_removal_audit": dict(env._dynamic_removal_audit),
+            "composite_frames": len(traffic_save),
             "segments": perf.summary(),
             "step_timings_ms": step_timings,
         }, f, indent=2)
@@ -454,6 +601,7 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
         print(f"               refine mean={_st.mean(ref):.0f} p50={_q(ref,.5):.0f} p90={_q(ref,.9):.0f}")
         print(f"               ad     mean={_st.mean(ad):.0f}  p50={_q(ad,.5):.0f}  p90={_q(ad,.9):.0f}")
         print(f"               env    mean={_st.mean(env_):.0f} p50={_q(env_,.5):.0f} p90={_q(env_,.9):.0f}")
+    env.close()
     print(f"[aether] artifacts written to {output_dir}")
 
 

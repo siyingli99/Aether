@@ -28,6 +28,7 @@ moviepy>=2.0
 PyYAML>=6.0
 scipy>=1.11
 rich
+ninja
 
 # Difix RGB refinement runs in the same AETHER environment.
 diffusers==0.25.1

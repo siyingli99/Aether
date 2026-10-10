@@ -1,6 +1,2 @@
 output_dir: ./aether_results
-dataset: pandaset
-
-# Legacy adapter fallback. The primary UniAD definition lives in
-# configs/adapters/uniad.yaml and resolves relative to the repository root.
-uniad_path: third_party/uniad_sim/tools/e2e.sh
+dataset: nuscenes

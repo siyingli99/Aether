@@ -148,7 +148,14 @@ class AetherDrivingEnv(gym.Env):
         os.makedirs(output_dir, exist_ok=True)
 
         ckpt = cfg.scenario.checkpoint
-        self.renderer = DriveStudioRenderer(ckpt, device="cuda")
+        traffic_cfg = getattr(cfg.scenario, "traffic", None)
+        hide_original_dynamic = bool(
+            getattr(traffic_cfg, "hide_original_dynamic", False)
+        ) if traffic_cfg is not None else False
+        excluded_models = ("SMPLNodes",) if hide_original_dynamic else ()
+        self.renderer = DriveStudioRenderer(
+            ckpt, device="cuda", excluded_model_classes=excluded_models
+        )
         self._apply_distill_overlay()
         self._max_frame = self.renderer.num_frames - 1
 
@@ -236,6 +243,109 @@ class AetherDrivingEnv(gym.Env):
         self._step_count = 0
         # Background gaussian centers for collision and ground-height queries.
         self._init_collision_assets(term)
+        self._traffic_provider = None
+        self._external_vehicle_pool = None
+        self._traffic_visualizer = None
+        self._dynamic_removal_audit = {}
+        self._init_traffic_backend()
+
+    def _scenario_path(self, value: str | Path) -> Path:
+        path = Path(str(value)).expanduser()
+        if not path.is_absolute():
+            path = Path(str(self.cfg.scenario._yaml_dir)) / path
+        return path.resolve()
+
+    def _init_traffic_backend(self) -> None:
+        """Attach a traffic source and reusable 3DRealCar Gaussian pool."""
+        traffic = getattr(self.cfg.scenario, "traffic", None)
+        if traffic is None or not bool(getattr(traffic, "enabled", False)):
+            return
+        from ..render.external_assets import ExternalVehiclePool, GaussianVehicleAsset
+        from ..traffic.client import LimSimTrafficClient, ReplayTrafficClient
+        from ..traffic.coordinates import FrameTransform, nuscenes_scene_local_to_ds
+        from ..traffic.provider import TrafficActorProvider
+
+        asset_path = self._scenario_path(str(traffic.asset_path))
+        asset = GaussianVehicleAsset.load(
+            asset_path,
+            max_gaussians=int(getattr(traffic, "max_gaussians", 50_000)),
+        )
+        pool = ExternalVehiclePool(
+            self.renderer,
+            asset,
+            capacity=int(getattr(traffic, "max_vehicles", 6)),
+            hide_original_rigid=bool(getattr(traffic, "hide_original_rigid", True)),
+            hide_original_dynamic=bool(getattr(
+                traffic, "hide_original_dynamic",
+                getattr(traffic, "hide_original_rigid", True),
+            )),
+        )
+
+        backend = str(getattr(traffic, "backend", "limsim")).lower()
+        if backend == "limsim":
+            client = LimSimTrafficClient(
+                host=str(getattr(traffic, "host", "127.0.0.1")),
+                port=int(getattr(traffic, "port", 8766)),
+                timeout_s=float(getattr(traffic, "timeout_s", 10.0)),
+            )
+        elif backend == "replay":
+            client = ReplayTrafficClient.from_json(
+                self._scenario_path(str(traffic.replay_path))
+            )
+        else:
+            raise ValueError(f"unsupported traffic backend: {backend!r}")
+
+        alignment = getattr(traffic, "alignment_path", None)
+        if alignment:
+            transform = FrameTransform.load(self._scenario_path(str(alignment)))
+        elif self._ds_dataset == "nuscenes":
+            transform = nuscenes_scene_local_to_ds(
+                ground_ds_y=float(getattr(self, "_ground_ref", 0.0))
+            )
+        else:
+            raise ValueError("automatic traffic alignment is currently implemented for nuScenes only")
+
+        self._external_vehicle_pool = pool
+        self._traffic_provider = TrafficActorProvider(client, transform, pool.instance_ids)
+        self.actors = self._traffic_provider
+        self._dynamic_removal_audit = pool.assert_original_dynamic_hidden()
+        net_file = getattr(traffic, "net_file", None)
+        if net_file:
+            from ..traffic.visualization import LimSimTopDownRenderer
+            self._traffic_visualizer = LimSimTopDownRenderer(
+                self._scenario_path(str(net_file))
+            )
+        print(
+            f"[traffic] backend={backend}, asset={asset_path.name}, "
+            f"gaussians/vehicle={asset.num_gaussians}, slots={len(pool.instance_ids)}",
+            flush=True,
+        )
+        print(
+            f"[traffic] original dynamic foreground hidden: "
+            f"{self._dynamic_removal_audit}", flush=True,
+        )
+
+    def render_traffic_2d(self) -> np.ndarray | None:
+        """Return the synchronized full-map LimSim view for video composition."""
+        if self._traffic_visualizer is None or self._traffic_provider is None:
+            return None
+        return self._traffic_visualizer.render(
+            self._traffic_provider.frame, self._traffic_ego_state()
+        )
+
+    def _traffic_ego_state(self):
+        from ..traffic.protocol import EgoState
+        return EgoState(
+            x=float(self.ego.vab[1]),
+            y=-float(self.ego.vab[0]),
+            # BicycleEgo positive yaw turns toward lateral-right; traffic yaw is
+            # CCW toward local-left.
+            yaw=-float(self.ego.vr[1]),
+            speed=float(self.ego.velo),
+            length=float(self.whl[2]),
+            width=float(self.whl[0]),
+            height=float(self.whl[1]),
+        )
 
     def _apply_distill_overlay(self) -> None:
         """Apply a formal reverse-distilled Background state when configured."""
@@ -254,8 +364,17 @@ class AetherDrivingEnv(gym.Env):
 
     def _init_route_reference(self) -> None:
         """Build the logged route centerline used only for route-progress scoring."""
-        ego_dir = self._ds_scene_dir / "ego_pose"
-        paths = sorted(ego_dir.glob("*.txt"))
+        if self._ds_dataset == "nuscenes":
+            # DriveStudio's nuScenes preprocessing stores the moving camera
+            # poses in ``extrinsics`` and does not create ``ego_pose``.  The
+            # FRONT camera (id 0) is also the world anchor used by its pixel
+            # source, so its per-frame poses give the logged route in exactly
+            # the same DS coordinate frame as the renderer.
+            route_source = self._ds_scene_dir / "extrinsics"
+            paths = sorted(route_source.glob("*_0.txt"))
+        else:
+            route_source = self._ds_scene_dir / "ego_pose"
+            paths = sorted(route_source.glob("*.txt"))
         points = []
         for path in paths:
             pose_ds = self._ds_inv_anchor @ _load_4x4(path)
@@ -267,7 +386,9 @@ class AetherDrivingEnv(gym.Env):
             )
         route = np.asarray(points, dtype=np.float64)
         if len(route) < 2:
-            raise RuntimeError(f"route requires at least two logged ego poses: {ego_dir}")
+            raise RuntimeError(
+                f"route requires at least two logged poses: {route_source}"
+            )
         segments = route[1:] - route[:-1]
         lengths = np.linalg.norm(segments, axis=1)
         keep = lengths > 1e-6
@@ -671,6 +792,17 @@ class AetherDrivingEnv(gym.Env):
         P[1, lat_ax] = -1.0   # DS lat is right-positive, env y is left.
         P[2, up_ax]  = up_sign
         for entry in self.actors.pose_at(self.frame_idx):
+            if "x" in entry and "y" in entry:
+                # Traffic providers already report canonical road-local
+                # coordinates (x forward, y left, yaw CCW). Avoid trying to
+                # infer heading from the object-to-DS basis, whose canonical
+                # object axes intentionally differ from DS world axes.
+                w, l, h = entry["size"]
+                boxes.append([
+                    float(entry["x"]), float(entry["y"]), float(entry.get("z", 0.0)),
+                    float(w), float(l), float(h), float(entry["yaw"]),
+                ])
+                continue
             T_world_ds = np.asarray(entry["c2w"], dtype=np.float32)
             R_env = (P @ T_world_ds[:3, :3] @ P.T).astype(np.float32)
             yaw_env = float(SCR.from_matrix(R_env).as_euler("ZYX")[0])
@@ -696,6 +828,7 @@ class AetherDrivingEnv(gym.Env):
                 self.ego.vab, self.ego.vr, self.frame_idx)),
             "ego_box":   self._ego_box_envframe(),
             "obj_boxes": self._objs_list_envframe(),
+            "dynamic_removal_audit": dict(self._dynamic_removal_audit),
             "cam_params": {
                 name: {
                     "intrinsic": c["intrinsic"],
@@ -715,6 +848,8 @@ class AetherDrivingEnv(gym.Env):
         # CCD bookkeeping: cache previous ego/object poses for sweep tests.
         self._prev_ego_box = None
         self._prev_obj_boxes = None
+        if self._traffic_provider is not None:
+            self._traffic_provider.reset(self._traffic_ego_state())
         return self._get_obs(), self._get_info()
 
     def step(self, action):
@@ -729,6 +864,8 @@ class AetherDrivingEnv(gym.Env):
         self.timestamp += self.ego.dt
         self._step_count += 1
         self.ego.step(action["acc"], action["steer_rate"])
+        if self._traffic_provider is not None:
+            self._traffic_provider.advance(self.timestamp, self._traffic_ego_state())
 
         terminated = False
         reward = 0.0
@@ -760,6 +897,11 @@ class AetherDrivingEnv(gym.Env):
         info["bg_collision"] = bg_hit
         info["off_scene"] = off_scene_hit
         return self._get_obs(), reward, terminated, truncated, info
+
+    def close(self):
+        if self._traffic_provider is not None:
+            self._traffic_provider.close()
+        return super().close()
 
     def _fg_collision(self) -> bool:
         try:

@@ -34,8 +34,8 @@ class InstanceInfo:
 class KinematicPerturbation:
     """Window-level kinematic edit applied as a per-frame pose offset.
 
-    Same 4-D semantic schema used by the diagnosis (v_lat, a_lon, omega_yaw,
-    kappa_len) but exposed here as a free-standing, reusable knob.
+    The edit is expressed in the actor's frame: lateral velocity, longitudinal
+    acceleration, yaw rate, and a longitudinal-distance scale.
     """
     v_lat: float = 0.0
     a_lon: float = 0.0
@@ -202,25 +202,30 @@ class ForegroundController:
         anchor for the integration; the offset at frame ``f`` is computed
         with ``t = (f - base_frame) * kin.dt``.
         """
-        # Lazy import so the diagnose module stays the single owner of the
-        # closed-form ``perturb_pose`` implementation.
-        from aether.diagnose.semantics import (
-            SemanticPerturbation, perturb_pose,
-        )
         if not frames:
             return
         bf = int(frames[0]) if base_frame is None else int(base_frame)
         c2w0 = self.pose_at(class_name, instance_id, bf)
         if c2w0 is None:
             return
-        z = SemanticPerturbation.zero()
-        z.z[0] = float(kin.v_lat)
-        z.z[1] = float(kin.a_lon)
-        z.z[2] = float(kin.omega_yaw)
-        z.z[3] = float(kin.kappa_len)
+        from scipy.spatial.transform import Rotation as SCR
+        base_rotation = np.asarray(c2w0[:3, :3], dtype=np.float64)
+        base_translation = np.asarray(c2w0[:3, 3], dtype=np.float64)
         for f in frames:
             t = (int(f) - bf) * float(kin.dt)
-            c2w_t = perturb_pose(c2w0, z, t=t, v_lon0=float(kin.v_lon0))
+            longitudinal = (
+                float(kin.v_lon0) * t + 0.5 * float(kin.a_lon) * t * t
+            ) * (1.0 + float(kin.kappa_len))
+            lateral = float(kin.v_lat) * t
+            c2w_t = np.eye(4, dtype=np.float32)
+            c2w_t[:3, :3] = (
+                base_rotation @ SCR.from_euler("z", float(kin.omega_yaw) * t).as_matrix()
+            ).astype(np.float32)
+            c2w_t[:3, 3] = (
+                base_translation + base_rotation @ np.asarray(
+                    [longitudinal, lateral, 0.0], dtype=np.float64
+                )
+            ).astype(np.float32)
             self.set_pose_override(class_name, int(instance_id), int(f), c2w_t)
 
     # ----------- appearance ----------- #

@@ -1,4 +1,4 @@
-"""Driving-command providers for UniAD closed-loop simulation.
+"""Driving-command providers for closed-loop AD (UniAD / VAD).
 
 UniAD's planning head conditions on a discrete high-level command:
   0 = turn right, 1 = turn left, 2 = go straight.
@@ -48,7 +48,10 @@ def _commands_from_bev_path(xy_fwd_lat: np.ndarray,
         yaw = math.atan2(float(d[1]), float(d[0]))
         c, s = math.cos(yaw), math.sin(yaw)
         dx, dy = xy_fwd_lat[end] - xy_fwd_lat[i]
-        lat_right = s * dx - c * dy
+        # In (forward, right) coordinates the right-hand normal to the
+        # current heading (c, s) is (-s, c).  The opposite sign silently
+        # swaps UniAD's right/left commands on curved roads.
+        lat_right = -s * dx + c * dy
         if lat_right >= lat_thresh:
             cmds[i] = 0
         elif lat_right <= -lat_thresh:
@@ -94,15 +97,19 @@ class GroundParamCommandProvider(_NearestLookupProvider):
 
 
 class EgoPoseCommandProvider(_NearestLookupProvider):
-    """Derive commands from processed ``ego_pose/*.txt`` in DS world."""
+    """Derive commands from the processed logged trajectory in DS world."""
 
     def __init__(self, scene_dir: Path, inv_anchor: np.ndarray, dataset: str):
-        ego_dir = scene_dir / "ego_pose"
-        if not ego_dir.is_dir():
-            raise FileNotFoundError(f"ego_pose dir not found: {ego_dir}")
-        paths = sorted(ego_dir.glob("*.txt"))
+        if dataset == "nuscenes":
+            pose_dir = scene_dir / "extrinsics"
+            paths = sorted(pose_dir.glob("*_0.txt"))
+        else:
+            pose_dir = scene_dir / "ego_pose"
+            paths = sorted(pose_dir.glob("*.txt"))
+        if not pose_dir.is_dir():
+            raise FileNotFoundError(f"logged pose dir not found: {pose_dir}")
         if not paths:
-            raise FileNotFoundError(f"no ego_pose files in {ego_dir}")
+            raise FileNotFoundError(f"no logged pose files in {pose_dir}")
         bev = []
         for p in paths:
             raw = _load_4x4(p)
@@ -111,7 +118,7 @@ class EgoPoseCommandProvider(_NearestLookupProvider):
         ref_bev = np.stack(bev, axis=0)
         commands = _commands_from_bev_path(ref_bev)
         super().__init__(ref_bev, commands)
-        print(f"[command] derived from GT ego_pose ({len(commands)} frames, "
+        print(f"[command] derived from GT trajectory ({len(commands)} frames, "
               f"scene={scene_dir.name})", flush=True)
 
 
@@ -150,7 +157,7 @@ def build_command_provider(
         try:
             return EgoPoseCommandProvider(Path(scene_dir), inv_anchor, dataset)
         except FileNotFoundError as e:
-            print(f"[command] GT ego_pose unavailable ({e}); "
+            print(f"[command] GT trajectory unavailable ({e}); "
                   f"falling back to straight", flush=True)
 
     print("[command] no ground_param / ego_pose; default command=2 (straight)",

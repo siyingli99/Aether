@@ -1,8 +1,7 @@
 """Fine-grained per-instance foreground control.
 
 This package exposes a single high-level entry point :class:`ForegroundController`
-that lets *any* AETHER task (diagnosis, scenario authoring, replay editing,
-counterfactual studies, ...) tweak individual trained 3DGS instances:
+for scenario authoring, replay editing, and per-instance 3DGS control:
 
     * pose: rigid SE(3) overrides per frame (delegates to
       ``DriveStudioRenderer.set_actor_pose``).

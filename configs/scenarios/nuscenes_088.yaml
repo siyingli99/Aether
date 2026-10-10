@@ -1,0 +1,42 @@
+scene_name: nuscenes_088
+mode: limsim_camera
+checkpoint: ${aether:data/checkpoints/nuscenes_outputs/scene_recon_full/scene_88_6cams_with_humans/checkpoint_final.pth}
+
+start_ab: [0.0, 0.0]
+start_euler: [0.0, 0.0, 0.0]
+start_velo: 2.0
+start_steer: 0.0
+ego_whl: [1.85, 1.5, 4.5]
+
+actors: []
+actor_backend: limsim
+traffic:
+  enabled: true
+  backend: limsim
+  host: 127.0.0.1
+  port: 8766
+  timeout_s: 30.0
+  max_vehicles: 3
+  max_gaussians: 50000
+  hide_original_dynamic: true
+  asset_path: ${aether:data/assets/vehicles/3drealcar_2024_06_04_15_34_51}
+  net_file: ${aether:data/limsim/nuscenes_088/scene088.net.xml}
+
+difix:
+  required: true
+  expected_cameras: 6
+
+lidar:
+  enabled: false
+
+termination:
+  fg_collision: true
+  fg_collision_min_overlap: 0.1
+  bg_collision: true
+  bg_threshold: 50
+  off_scene: true
+  off_scene_radius: 5.0
+  off_scene_streak: 4
+  max_steps: 39
+  ground_query_radius: 4.0
+  ground_quantile: 0.1
