@@ -149,12 +149,18 @@ class AetherDrivingEnv(gym.Env):
 
         ckpt = cfg.scenario.checkpoint
         traffic_cfg = getattr(cfg.scenario, "traffic", None)
-        hide_original_dynamic = bool(
-            getattr(traffic_cfg, "hide_original_dynamic", False)
-        ) if traffic_cfg is not None else False
-        excluded_models = ("SMPLNodes",) if hide_original_dynamic else ()
+        hide_original_dynamic = (
+            bool(getattr(traffic_cfg, "hide_original_dynamic", False))
+            and bool(getattr(traffic_cfg, "enabled", False))
+            if traffic_cfg is not None else False
+        )
+        excluded_models = set(getattr(
+            cfg.scenario, "excluded_model_classes", []
+        ) or [])
+        if hide_original_dynamic:
+            excluded_models.add("SMPLNodes")
         self.renderer = DriveStudioRenderer(
-            ckpt, device="cuda", excluded_model_classes=excluded_models
+            ckpt, device="cuda", excluded_model_classes=tuple(sorted(excluded_models))
         )
         self._apply_distill_overlay()
         self._max_frame = self.renderer.num_frames - 1
@@ -247,6 +253,20 @@ class AetherDrivingEnv(gym.Env):
         self._external_vehicle_pool = None
         self._traffic_visualizer = None
         self._dynamic_removal_audit = {}
+        self._studio_manager = None
+        if _backend == "studio":
+            from ..studio.runtime import StudioActorManager
+            self._studio_manager = StudioActorManager(
+                self.renderer, cfg.scenario.studio, self
+            )
+            self.actors = self._studio_manager
+            self._traffic_provider = self._studio_manager
+            self._external_vehicle_pool = self._studio_manager.pool
+            self._dynamic_removal_audit = self._studio_manager.removal_audit()
+            net_file = getattr(cfg.scenario.studio.limsim, "net_file", None)
+            if net_file and bool(getattr(cfg.scenario.studio.limsim, "enabled", False)):
+                from ..traffic.visualization import LimSimTopDownRenderer
+                self._traffic_visualizer = LimSimTopDownRenderer(Path(str(net_file)))
         self._init_traffic_backend()
 
     def _scenario_path(self, value: str | Path) -> Path:

@@ -67,6 +67,9 @@ lidar_pairs/
 *.pickle
 !third_party/uniad_sim/data/**/*.pkl
 reports/
+studio_workspace/
+web/node_modules/
+!configs/studio/traffic/*.npz
 
 # Superseded local integration prototypes
 tess_bridge/

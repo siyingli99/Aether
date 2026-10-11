@@ -12,6 +12,7 @@ AETHER connects editable 3D Gaussian scenes, LimSim traffic and end-to-end drivi
 - [x] nuScenes HD-map export and LimSim traffic
 - [x] Six-camera Difix refinement
 - [x] UniAD closed-loop adapter
+- [x] Browser-based scene and experiment editor
 - [ ] Public evaluation protocol
 
 ## Quick Start
@@ -95,6 +96,49 @@ bash scripts/run_closed_loop.sh 088 --no_io_trace
 ```
 
 Use `AETHER_CUDA=1` to select another GPU. Results are saved under `aether_results/nuscenes/<scene>/uniad/limsim_camera/`; `limsim_aether.mp4` is the synchronized LimSim/AETHER video.
+
+## AETHER Studio
+
+```bash
+python scripts/aether_studio.py --host 127.0.0.1 --port 8000
+```
+
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The editor loads the registered scenes and six-camera previews, then lets you:
+
+1. select a scene and inspect its HD-map topology;
+2. keep/remove reconstructed actors, replace vehicles with 3DRealCar assets, or add new vehicles on the map;
+3. assign a recorded, open-loop, LimSim or registered Python controller and set the ego start, planner and Difix options;
+4. validate, save and run the experiment while following its log in the browser.
+
+Scene, vehicle, planner and controller entries are registered in `configs/studio/catalog.yaml`. Saved specifications and run artifacts are written to `studio_workspace/experiments/<experiment-id>/`; the generated scenario is immutable for that run.
+
+To add a local traffic controller, implement the class contract below and register its import path as an `entrypoint` in the catalog. The Studio UI then exposes it in the controller list.
+
+```python
+class MyController:
+    def setup(self, context): ...
+    def reset(self): ...
+    def step(self, time_s, actor, ego):
+        return {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+    def close(self): ...
+```
+
+```yaml
+controllers:
+  - id: my_controller
+    name: My controller
+    kind: plugin
+    entrypoint: my_package.controller:MyController
+```
+
+The public editor frame is `x=forward`, `y=left`, `z=up`, with counter-clockwise positive yaw. Conversion to the renderer, bicycle model and planner output frames is centralized in `aether/studio/coordinates.py`.
+
+For frontend development only:
+
+```bash
+corepack pnpm --dir web install
+corepack pnpm --dir web build
+```
 
 ## Scenario configuration and editing
 

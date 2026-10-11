@@ -187,18 +187,22 @@ class GaussianVehicleAsset:
 class ExternalVehiclePool:
     """Append reusable 3DRealCar instances to a loaded DriveStudio model."""
 
-    def __init__(self, renderer: Any, asset: GaussianVehicleAsset,
+    def __init__(self, renderer: Any, asset: GaussianVehicleAsset | list[GaussianVehicleAsset],
                  capacity: int = 6, hide_original_rigid: bool = True,
                  hide_original_dynamic: bool | None = None) -> None:
-        if int(capacity) <= 0:
+        assets = list(asset) if isinstance(asset, list) else [asset] * int(capacity)
+        if not assets or (not isinstance(asset, list) and int(capacity) <= 0):
             raise ValueError("vehicle pool capacity must be positive")
+        if isinstance(asset, list) and int(capacity) not in (len(assets), 6):
+            raise ValueError("capacity must match the heterogeneous asset list")
         model = renderer.trainer.models.get("RigidNodes")
         if model is None:
             raise RuntimeError("checkpoint does not contain RigidNodes")
         self.model = model
         self._models = renderer.trainer.models
-        self.asset = asset
-        self.capacity = int(capacity)
+        self.assets = assets
+        self.asset = assets[0]
+        self.capacity = len(assets)
         self.original_instance_count = int(model.instances_fv.shape[1])
         self._original_visibility = model.instances_fv[:, :self.original_instance_count].detach().clone()
         self.instance_ids = tuple(
@@ -300,21 +304,23 @@ class ExternalVehiclePool:
         setattr(model, name, nn.Parameter(value, requires_grad=requires_grad))
 
     def _append_instances(self) -> None:
-        model, asset = self.model, self.asset
+        model = self.model
         device = model._means.device
-        count = asset.num_gaussians
         with torch.no_grad():
-            for name, values in asset.as_tensors().items():
-                repeated = values.to(device).repeat((self.capacity,) + (1,) * (values.ndim - 1))
+            for name in _PARAMETER_NAMES:
+                appended = torch.cat(
+                    [asset.as_tensors()[name].to(device) for asset in self.assets], dim=0
+                )
                 old = getattr(model, name).detach()
-                self._replace_parameter(model, name, torch.cat((old, repeated), dim=0))
+                self._replace_parameter(model, name, torch.cat((old, appended), dim=0))
 
-            point_ids = torch.arange(
-                self.original_instance_count,
-                self.original_instance_count + self.capacity,
-                dtype=torch.long,
-                device=device,
-            ).repeat_interleave(count).unsqueeze(-1)
+            point_ids = torch.cat([
+                torch.full(
+                    (asset.num_gaussians, 1), self.original_instance_count + index,
+                    dtype=torch.long, device=device,
+                )
+                for index, asset in enumerate(self.assets)
+            ], dim=0)
             model.point_ids = torch.cat((model.point_ids, point_ids), dim=0)
 
             frames = int(model.instances_trans.shape[0])
@@ -322,7 +328,9 @@ class ExternalVehiclePool:
             quaternions = torch.zeros((frames, self.capacity, 4), dtype=torch.float32, device=device)
             quaternions[..., 0] = 1.0
             validity = torch.zeros((frames, self.capacity), dtype=torch.bool, device=device)
-            sizes = torch.tensor(asset.size_lwh, dtype=torch.float32, device=device).repeat(self.capacity, 1)
+            sizes = torch.tensor(
+                [asset.size_lwh for asset in self.assets], dtype=torch.float32, device=device
+            )
             self._replace_parameter(
                 model, "instances_trans",
                 torch.cat((model.instances_trans.detach(), translations), dim=1),

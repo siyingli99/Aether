@@ -39,6 +39,9 @@ from aether.agents.registry import load_adapter, launch_adapter, list_adapters
 
 
 def _resolve_output_dir(cfg, ad: str) -> str:
+    explicit = getattr(cfg.scenario, "output_dir", None)
+    if explicit:
+        return str(explicit)
     root = cfg.base.output_dir
     scene = cfg.scenario.scene_name
     mode = getattr(cfg.scenario, "mode", "easy")

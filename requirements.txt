@@ -29,6 +29,9 @@ PyYAML>=6.0
 scipy>=1.11
 rich
 ninja
+fastapi>=0.115,<1
+pydantic>=2.9,<3
+uvicorn[standard]>=0.30,<1
 
 # Difix RGB refinement runs in the same AETHER environment.
 diffusers==0.25.1

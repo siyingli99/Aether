@@ -12,6 +12,7 @@ AETHER 将可编辑的三维高斯场景、LimSim 交通流和端到端驾驶算
 - [x] nuScenes 高精地图导出与 LimSim 交通流
 - [x] 六路相机 Difix 修复
 - [x] UniAD 闭环适配器
+- [x] 可视化场景与实验编辑器
 - [ ] 公开评测协议
 
 ## Quick Start
@@ -95,6 +96,49 @@ bash scripts/run_closed_loop.sh 088 --no_io_trace
 ```
 
 使用 `AETHER_CUDA=1` 可切换 GPU。结果位于 `aether_results/nuscenes/<scene>/uniad/limsim_camera/`，其中 `limsim_aether.mp4` 是 LimSim/AETHER 同步视频。
+
+## AETHER Studio
+
+```bash
+python scripts/aether_studio.py --host 127.0.0.1 --port 8000
+```
+
+打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。编辑器会加载已注册场景、完整高精地图拓扑和六路相机预览，可直接完成：
+
+1. 选择场景并查看路网；
+2. 保留或删除原场景动态物体，用 3DRealCar 资产替换车辆，或在地图上新增车辆；
+3. 为车辆选择原始轨迹、开环轨迹、LimSim 或注册的 Python 控制器，并配置自车起点、端到端算法及 Difix；
+4. 校验、保存和运行实验，并在浏览器中查看运行日志。
+
+场景、车辆资产、算法和控制器统一注册在 `configs/studio/catalog.yaml`。实验配置和结果保存在 `studio_workspace/experiments/<experiment-id>/`，每次运行都会生成不可变的场景配置。
+
+接入本地交通控制器时，实现以下接口，再把导入路径作为 `entrypoint` 注册到目录；注册后即可在前端下拉框中选择。
+
+```python
+class MyController:
+    def setup(self, context): ...
+    def reset(self): ...
+    def step(self, time_s, actor, ego):
+        return {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+    def close(self): ...
+```
+
+```yaml
+controllers:
+  - id: my_controller
+    name: My controller
+    kind: plugin
+    entrypoint: my_package.controller:MyController
+```
+
+编辑器统一使用 `x=前`、`y=左`、`z=上`、偏航角逆时针为正的道路坐标系。渲染器、自行车模型和算法输出的坐标转换集中在 `aether/studio/coordinates.py`。
+
+仅开发前端时需要重新构建：
+
+```bash
+corepack pnpm --dir web install
+corepack pnpm --dir web build
+```
 
 ## 场景配置与编辑
 
