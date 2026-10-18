@@ -75,7 +75,9 @@ def _load_traffic_log(path: Optional[str | Path]) -> Dict[str, Dict[int, np.ndar
 
 
 def _actor_from_dict(d: Dict[str, Any],
-                     traffic_log: Dict[str, Dict[int, np.ndarray]]
+                     traffic_log: Dict[str, Dict[int, np.ndarray]],
+                     sim_dt: float = 0.1,
+                     frame_dt: float = 0.1,
                      ) -> Optional[Actor]:
     sz = d.get("size", [1.85, 4.5, 1.6])
     if len(sz) != 3:
@@ -93,9 +95,9 @@ def _actor_from_dict(d: Dict[str, Any],
             if traj is None:
                 # No baked trajectory found -> skip this actor (better than crashing)
                 return None
-            policy = LogReplayPolicy(traj)
+            policy = LogReplayPolicy(traj, frame_dt=frame_dt)
         else:
-            policy = policy_from_dict(policy_spec)
+            policy = policy_from_dict(policy_spec, default_dt=sim_dt)
     return Actor(
         actor_id=int(d.get("actor_id", -1)),
         class_name=class_name,
@@ -111,17 +113,21 @@ def _actor_from_dict(d: Dict[str, Any],
 
 def scene_from_scenario_actors(actors: Iterable[Dict[str, Any]],
                                traffic_log: Optional[str | Path] = None,
+                               sim_dt: float = 0.1,
+                               frame_dt: float = 0.1,
                                ) -> Scene:
     """Build a :class:`Scene` from a YAML ``actors`` list.
 
     ``traffic_log`` (optional) is the .npz path produced by
     ``tools/extract_traffic_from_ckpt.py`` and supplies LogReplay
     trajectories for actors whose ``policy.type == "log_replay"``.
+    ``sim_dt`` is the closed-loop step used by stateful policies (IDM) and
+    ``frame_dt`` the time between two recorded DriveStudio frames.
     """
     tl = _load_traffic_log(traffic_log)
     sc = Scene()
     for spec in (actors or []):
-        a = _actor_from_dict(spec, tl)
+        a = _actor_from_dict(spec, tl, sim_dt=sim_dt, frame_dt=frame_dt)
         if a is not None:
             sc.add(a)
     return sc

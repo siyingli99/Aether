@@ -184,7 +184,12 @@ WEB_DIST = REPO_ROOT / "web/dist"
 if WEB_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
 
+    _WEB_DIST_ROOT = WEB_DIST.resolve()
+
     @app.get("/{path:path}", include_in_schema=False)
     def frontend(path: str):
-        candidate = WEB_DIST / path
-        return FileResponse(candidate if candidate.is_file() else WEB_DIST / "index.html")
+        candidate = (WEB_DIST / path).resolve()
+        # SPA fallback; never serve files outside web/dist (e.g. "../..").
+        if not candidate.is_relative_to(_WEB_DIST_ROOT) or not candidate.is_file():
+            candidate = WEB_DIST / "index.html"
+        return FileResponse(candidate)

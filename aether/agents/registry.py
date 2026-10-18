@@ -83,6 +83,36 @@ def list_adapters(cfg_dir: Optional[str] = None) -> List[str]:
                   for f in os.listdir(d) if f.endswith(".yaml"))
 
 
+def load_adapter_file(path: str | os.PathLike, name: Optional[str] = None,
+                      repo_root: Optional[str | os.PathLike] = None) -> AdapterSpec:
+    """Load one adapter YAML.  Relative ``entrypoint``/``cwd`` resolve
+    against ``repo_root`` (default: the AETHER checkout)."""
+    path = os.fspath(path)
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    launcher = dict(data.get("launcher") or {})
+    root = Path(repo_root) if repo_root else Path(_DEFAULT_CFG_DIR).resolve().parents[1]
+    for key in ("entrypoint", "cwd"):
+        value = launcher.get(key)
+        if not value:
+            continue
+        expanded = Path(os.path.expandvars(os.path.expanduser(str(value))))
+        if not expanded.is_absolute():
+            expanded = root / expanded
+        launcher[key] = str(expanded.resolve())
+    fallback = name or Path(path).stem
+    return AdapterSpec(
+        name=str(data.get("name", fallback)),
+        display_name=str(data.get("display_name", fallback)),
+        launcher=launcher,
+        ipc=dict(data.get("ipc") or {}),
+        observation=dict(data.get("observation") or {}),
+        output=dict(data.get("output") or {}),
+        capabilities=dict(data.get("capabilities") or {}),
+        source_path=path,
+    )
+
+
 def load_adapter(name: str,
                  cfg_dir: Optional[str] = None,
                  legacy_cfg: Any = None) -> AdapterSpec:
@@ -90,29 +120,7 @@ def load_adapter(name: str,
     d = cfg_dir or _DEFAULT_CFG_DIR
     path = os.path.join(d, f"{name}.yaml")
     if os.path.isfile(path):
-        with open(path, "r") as f:
-            data = yaml.safe_load(f) or {}
-        launcher = dict(data.get("launcher") or {})
-        repo_root = Path(path).resolve().parents[2]
-        for key in ("entrypoint", "cwd"):
-            value = launcher.get(key)
-            if not value:
-                continue
-            expanded = Path(os.path.expandvars(os.path.expanduser(str(value))))
-            if not expanded.is_absolute():
-                expanded = repo_root / expanded
-            launcher[key] = str(expanded.resolve())
-        spec = AdapterSpec(
-            name=str(data.get("name", name)),
-            display_name=str(data.get("display_name", name)),
-            launcher=launcher,
-            ipc=dict(data.get("ipc") or {}),
-            observation=dict(data.get("observation") or {}),
-            output=dict(data.get("output") or {}),
-            capabilities=dict(data.get("capabilities") or {}),
-            source_path=path,
-        )
-        return spec
+        return load_adapter_file(path, name, repo_root=Path(path).resolve().parents[2])
     # Legacy fallback
     if legacy_cfg is not None:
         ep = getattr(legacy_cfg, f"{name}_path", None)
@@ -128,13 +136,13 @@ def launch_adapter(spec: AdapterSpec,
                    output_dir: str) -> subprocess.Popen:
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "ad_output.txt")
-    f = open(log_path, "w")
     args = spec.render_args(cuda_id, output_dir)
     cmd = ["bash", spec.entrypoint, *args]
-    proc = subprocess.Popen(
-        cmd, stdout=f, stderr=f,
-        cwd=spec.cwd, env=spec.render_env(),
-    )
+    with open(log_path, "w") as f:  # the child keeps its own descriptor
+        proc = subprocess.Popen(
+            cmd, stdout=f, stderr=f,
+            cwd=spec.cwd, env=spec.render_env(),
+        )
     print(f"[ad] launched {spec.name} ({spec.entrypoint}) "
           f"pid={proc.pid} -> {log_path}")
     return proc

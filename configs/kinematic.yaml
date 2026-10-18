@@ -5,8 +5,10 @@ max_acc: 2.0
 # HUGSIM does not clip acc/steer inside step(); ILQR still has its own limits.
 clip_acc: false
 clip_steer: false
+# Clamp speed at zero when braking (HUGSIM allowed reversing).
+allow_reverse: false
 fric: 0.2
 Lr: 1.35
 Lf: 1.35
 max_speed: 0.5
-dt: 0.25
+dt: 0.25

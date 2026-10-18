@@ -97,6 +97,17 @@ bash scripts/run_closed_loop.sh 088 --no_io_trace
 
 Use `AETHER_CUDA=1` to select another GPU. Results are saved under `aether_results/nuscenes/<scene>/uniad/limsim_camera/`; `limsim_aether.mp4` is the synchronized LimSim/AETHER video.
 
+| Environment variable | Default | Effect |
+|---|---|---|
+| `AETHER_AD_READY_TIMEOUT` | `1800` | seconds to wait for the adapter to load |
+| `AETHER_AD_STEP_TIMEOUT` | `900` | seconds one planner call may take; a dead or hung adapter fails the run with its log tail |
+| `AETHER_ILQR_MAX_SOLVE_TIME` | unset | wall-clock cap for iLQR; unset keeps control deterministic (`0.05` reproduces older runs) |
+| `UNIAD_VIS` / `UNIAD_VIS_WORKERS` | `1` / `4` | per-step UniAD visualization and its worker count |
+
+#### Results before October 2026
+
+The October 2026 fixes change closed-loop metrics: the background-collision box now rests on the local ground (it previously floated at camera height, about 2.1–3.6 m above the road on `scene-0383`), the obstacle band is measured from the local rather than a scene-wide ground, reconstructed actors keep their heading in `obj_boxes`, recorded actors advance at the dataset frame rate (`data_frame_dt`) instead of one frame per 0.25 s step; isolated floaters and splats inside the logged ego boxes no longer count as obstacles, off-scene detection measures distance to any reconstructed splat (road included) rather than to obstacles, braking no longer reverses the ego and iLQR no longer stops on a wall-clock budget. Set `legacy_compat: true` in the scenario (plus `AETHER_ILQR_MAX_SOLVE_TIME=0.05`) to reproduce earlier numbers.
+
 ## AETHER Studio
 
 ```bash
@@ -177,6 +188,11 @@ cp configs/scenarios/nuscenes_0383.yaml configs/scenarios/my_scene.yaml
 | `termination.fg_collision_min_overlap` | minimum vehicle box-overlap ratio | `_fg_collision_swept()` |
 | `termination.bg_threshold` | background splats inside the ego box before collision | `_bg_collision()` |
 | `termination.off_scene_radius`, `off_scene_streak` | reconstructed-area departure tolerance | `_off_scene_check()` |
+| `termination.ground_cell_size` | BEV cell (m) for the local ground under the obstacle band | `_height_above_local_ground()` |
+| `data_frame_dt` | seconds between DriveStudio frames: `0.1` for 10 Hz preprocessing (scene-0383), `0.5` for keyframe-only nuScenes (scene-0088) | `AetherDrivingEnv.frame_idx` |
+| `termination.bg_min_neighbors`, `bg_neighbor_radius` | obstacle splats need this many neighbours within the radius (drops isolated floaters) | `_filter_obstacles()` |
+| `termination.carve_logged_route` | remove splats inside the logged ego boxes: the recorded car drove there | `_filter_obstacles()` |
+| `legacy_compat` | `true` reproduces results produced before the October 2026 fixes (see below) | `AetherDrivingEnv` |
 
 The supplied scenes require six successful Difix outputs before every planner call. Tune its inference cost with arguments defined in `scripts/closed_loop.py`:
 

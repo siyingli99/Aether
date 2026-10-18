@@ -19,18 +19,21 @@ into ``self.actors`` with no further modifications.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation as SCR
 
 
-# DS-world axes per dataset (drivestudio convention):
+# DS-world axes per dataset (right-handed):
 #   pandaset : X = lateral_right, Y = forward, Z = up
 #   nuscenes : X = right,         Y = down,    Z = forward (FRONT-cam OpenCV)
-# We project actor poses to a canonical BEV  (x_bev = forward, y_bev = left)
-# matching ``_ego_box_envframe`` (box[0]=fwd, box[1]=left).
+# NOTE: AetherDrivingEnv's PandaSet branch uses fwd=X/lat=Y, which is
+# left-handed and needs to be verified against a PandaSet render; nuScenes
+# (the public demo path) is consistent in both places.
+# We project actor poses to a canonical BEV  (x_bev = forward, y_bev = left,
+# yaw CCW) matching ``_ego_box_envframe`` (box[0]=fwd, box[1]=left).
 
 _DS_DATASET: str = "pandaset"
 
@@ -55,18 +58,28 @@ def _ds_axes(dataset: str | None = None):
     return 1, 0, 2, +1.0       # pandaset: fwd=Y, lat=X(right+), up=+Z
 
 
-def _bev_from_c2w(c2w: np.ndarray) -> Tuple[float, float, float]:
-    """Project a DS-world c2w to canonical BEV (x_fwd, y_left, yaw_around_up)."""
-    fwd_ax, lat_ax, up_ax, up_sign = _ds_axes()
-    t = np.asarray(c2w, dtype=np.float32)[:3, 3]
-    R = np.asarray(c2w, dtype=np.float32)[:3, :3]
-    # Build env-frame rotation (x=fwd, y=left, z=up) from DS rotation.
+def _ds_to_env(dataset: str | None = None) -> np.ndarray:
+    """Rotation mapping DS-world vectors to env BEV axes (fwd, left, up)."""
+    fwd_ax, lat_ax, up_ax, up_sign = _ds_axes(dataset)
     P = np.zeros((3, 3), dtype=np.float32)
     P[0, fwd_ax] = 1.0       # env x = DS fwd
     P[1, lat_ax] = -1.0      # env y = -DS lat (= left, since DS lat is right+)
     P[2, up_ax]  = float(up_sign)
-    R_env = (P @ R @ P.T).astype(np.float32)
-    yaw = float(SCR.from_matrix(R_env).as_euler("ZYX")[0])
+    return P
+
+
+def _bev_from_c2w(c2w: np.ndarray) -> Tuple[float, float, float]:
+    """Project a DS-world c2w to canonical BEV (x_fwd, y_left, yaw CCW).
+
+    DriveStudio rigid objects use canonical axes x=heading, z=up, so the
+    object->env rotation is ``P @ R`` and the yaw is the heading of its +x
+    axis.  (Conjugating as ``P @ R @ P.T`` mixes object and world axes and
+    rotates every actor by about 90 degrees.)
+    """
+    fwd_ax, lat_ax, _, _ = _ds_axes()
+    t = np.asarray(c2w, dtype=np.float32)[:3, 3]
+    R_env = _ds_to_env() @ np.asarray(c2w, dtype=np.float32)[:3, :3]
+    yaw = float(np.arctan2(R_env[1, 0], R_env[0, 0]))
     return float(t[fwd_ax]), -float(t[lat_ax]), yaw
 
 
@@ -77,16 +90,10 @@ def _c2w_from_bev(x_bev: float, y_bev: float, yaw_bev: float,
     ``z_ds`` is the raw DS-world height (axis index depends on dataset);
     callers should pass through whatever was stored in ``ActorState.z_ds``.
     """
-    fwd_ax, lat_ax, up_ax, up_sign = _ds_axes()
-    # Env rotation around up-axis (z), then map back to DS rotation.
-    R_env = SCR.from_euler("ZYX", [float(yaw_bev), 0.0, 0.0]).as_matrix().astype(np.float32)
-    P = np.zeros((3, 3), dtype=np.float32)
-    P[0, fwd_ax] = 1.0
-    P[1, lat_ax] = -1.0
-    P[2, up_ax]  = float(up_sign)
-    R_ds = (P.T @ R_env @ P).astype(np.float32)
+    fwd_ax, lat_ax, up_ax, _ = _ds_axes()
+    R_env = SCR.from_euler("z", float(yaw_bev)).as_matrix().astype(np.float32)
     c2w = np.eye(4, dtype=np.float32)
-    c2w[:3, :3] = R_ds
+    c2w[:3, :3] = _ds_to_env().T @ R_env
     c2w[fwd_ax, 3] = float(x_bev)
     c2w[lat_ax, 3] = -float(y_bev)
     c2w[up_ax,  3] = float(z_ds)   # raw DS-axis height (callers preserve original)
@@ -95,9 +102,9 @@ def _c2w_from_bev(x_bev: float, y_bev: float, yaw_bev: float,
 
 @dataclass
 class ActorState:
-    x: float = 0.0          # HUGSIM-BEV x (right+)
-    y: float = 0.0          # HUGSIM-BEV y (forward+)
-    yaw: float = 0.0        # HUGSIM-BEV yaw (rad)
+    x: float = 0.0          # BEV x (forward+)
+    y: float = 0.0          # BEV y (left+)
+    yaw: float = 0.0        # BEV yaw (rad, CCW)
     velo: float = 0.0       # forward speed (m/s)
     z_ds: float = 0.0       # DS world height (y-axis in DS)
 
@@ -158,6 +165,11 @@ class Scene:
         self.ego: Dict[str, float] = {"x": 0.0, "y": 0.0, "yaw": 0.0, "velo": 0.0}
         # Per-frame state log keyed by actor_id; populated as policies advance.
         self.history: Dict[int, Dict[int, ActorState]] = {}
+        self._initial_states: Dict[int, ActorState] = {
+            a.actor_id: replace(a.state) for a in self.actors
+        }
+        self._cached_frame: Optional[int] = None
+        self._cached_entries: List[Dict[str, Any]] = []
 
     # ----------------- editing API ----------------- #
     def add(self, actor: Actor) -> Actor:
@@ -165,6 +177,8 @@ class Scene:
             actor.actor_id = self._next_id
         self._next_id = max(self._next_id, actor.actor_id + 1)
         self.actors.append(actor)
+        self._initial_states[actor.actor_id] = replace(actor.state)
+        self._cached_frame = None
         return actor
 
     def remove(self, actor_id: int) -> bool:
@@ -196,8 +210,28 @@ class Scene:
         self.ego.update(x=float(x), y=float(y), yaw=float(yaw), velo=float(velo))
 
     # ----------------- runtime hook (driving_env compatible) ----------------- #
+    def reset(self) -> None:
+        """Restore initial actor states and forget per-frame caches."""
+        for actor in self.actors:
+            initial = self._initial_states.get(actor.actor_id)
+            if initial is not None:
+                actor.state = replace(initial)
+            if actor.policy is not None and hasattr(actor.policy, "reset"):
+                actor.policy.reset()
+        self.history.clear()
+        self._cached_frame = None
+        self._cached_entries = []
+
     def pose_at(self, frame_idx: int) -> List[Dict[str, Any]]:
-        """Step every active actor and return renderer-ready dicts."""
+        """Advance policies to ``frame_idx`` and return renderer-ready dicts.
+
+        Idempotent per frame: the env queries poses several times per step
+        (render, collision, info), and stateful policies such as IDM must be
+        integrated exactly once per frame.
+        """
+        frame_idx = int(frame_idx)
+        if frame_idx == self._cached_frame:
+            return list(self._cached_entries)
         out: List[Dict[str, Any]] = []
         for actor in self.actors:
             if not actor.enabled or actor.policy is None:
@@ -209,7 +243,9 @@ class Scene:
             actor.state = new_state
             self.history.setdefault(actor.actor_id, {})[int(frame_idx)] = new_state
             out.append(actor.to_dict())
-        return out
+        self._cached_frame = frame_idx
+        self._cached_entries = out
+        return list(out)
 
     # ----------------- helpers ----------------- #
     def actor_ids(self) -> List[int]:

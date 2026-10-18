@@ -20,6 +20,13 @@ class BicycleEgo:
         # HUGSIM does not clip acc/steer inside step(); keep clipping opt-in.
         self.clip_acc = bool(getattr(kinematic_cfg, "clip_acc", False))
         self.clip_steer = bool(getattr(kinematic_cfg, "clip_steer", False))
+        # A braking planner must stop the car, not drive it backwards.  HUGSIM
+        # integrated negative speeds; set ``allow_reverse: true`` (or
+        # ``scenario.legacy_compat: true``) to reproduce that.
+        self.allow_reverse = bool(
+            getattr(kinematic_cfg, "allow_reverse", False)
+            or getattr(scenario_cfg, "legacy_compat", False)
+        )
 
         # Initial state, mirroring HUGSIM convention:
         #  vab = [a, b]  -> ego (x, y) in env frame (x=fwd, y=left)
@@ -46,6 +53,8 @@ class BicycleEgo:
         self.last_acc, self.last_steer_rate = acc, steer_rate
         L = self.Lr + self.Lf
         self.velo  += acc * self.dt
+        if not self.allow_reverse and self.velo < 0.0:
+            self.velo = 0.0
         self.steer += steer_rate * self.dt
         if self.clip_steer:
             self.steer = float(np.clip(self.steer, self.min_steer, self.max_steer))

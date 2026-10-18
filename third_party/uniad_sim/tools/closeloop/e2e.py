@@ -47,6 +47,36 @@ import multiprocessing
 
 warnings.filterwarnings("ignore")
 
+# UNIAD_VIS=0 disables the per-step BEV/camera visualization (saves CPU time).
+VISUALIZE = os.environ.get('UNIAD_VIS', '1') != '0'
+MAX_VIS_WORKERS = max(1, int(os.environ.get('UNIAD_VIS_WORKERS', '4')))
+
+
+def _to_cpu(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _to_cpu(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_to_cpu(item) for item in value)
+    return value
+
+
+def _safe_visualize(outputs, raw_images, save_fn):
+    try:
+        save_visualize_img(outputs, raw_images, save_fn)
+    except Exception as error:  # visualization must never break the loop
+        print(f'[uniad-vis] {save_fn}: {type(error).__name__}: {error}', flush=True)
+
+
+def _finish_visualization(processes, output_folder):
+    for process in processes:
+        process.join()
+    try:
+        to_video(output_folder)
+    except Exception as error:
+        print(f'[uniad-vis] video export failed: {error}', flush=True)
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='MMDet test (and eval) a model')
@@ -244,22 +274,17 @@ def main():
     os.makedirs(output_folder, exist_ok=True)
     while True:
         with open(obs_pipe, "rb") as pipe:
-            
-            try:
-                raw_data = pickle.load(pipe)
-            except Exception as e:
-                with open('/tmp/err_raw_data.bin', 'wb') as bad:
-                    pass
-                print(f"FAILED TO UNPICKLE, length={len(raw_data)}")
-                print(f"First 50 bytes: {raw_data[:50]}")
-                print(f"Last 50 bytes: {raw_data[-50:]}")
-                raise e
+            payload = pipe.read()
+        try:
+            raw_data = pickle.loads(payload)
+        except Exception:
+            print(f"FAILED TO UNPICKLE observation, length={len(payload)}, "
+                  f"head={payload[:50]!r}, tail={payload[-50:]!r}")
+            raise
         print('received')
-        
-        if raw_data == 'Done':
-            for process in vis_process_pool:
-                process.join()
-            to_video(output_folder)
+
+        if isinstance(raw_data, str) and raw_data == 'Done':
+            _finish_visualization(vis_process_pool, output_folder)
             exit(0)
 
         data = parse_raw(raw_data, cameras, img_norm_cfg, history)
@@ -271,37 +296,38 @@ def main():
                 results = model(return_loss=False, rescale=True, **data)
         except RuntimeError as e:
             results = None
-            print(e)
-        
-        # results post processing
-        results[0]['planning_traj'] = results[0]['planning']['result_planning']['sdc_traj'].cpu().detach().numpy()
-        results[0]['pts_bbox']['score_list'] = results[0]['pts_bbox']['score_list'].detach().cpu().numpy()
-        results[0]['pts_bbox']['lane_score'] = results[0]['pts_bbox']['lane_score'].detach().cpu().numpy()
-        results[0]['command'] = data['command'][0].cpu().detach().numpy()
-        
-        save_fn = osp.join(output_folder, f'{str(cnt).zfill(4)}')
-        # single process
-        # save_visualize_img(results[0], raw_images, save_fn)
-        
-        # multi-process
-        process = multiprocessing.Process(target=save_visualize_img, 
-                                  args=(results[0], raw_images, save_fn))
-        vis_process_pool.append(process)
-        process.start()
+            print(f'UniAD inference failed: {e}', flush=True)
 
-        if results is not None:
-            plan_traj = results[0]['planning']['result_planning']['sdc_traj'][0].detach().cpu().numpy()
-            with open(plan_pipe, "wb") as pipe:
-                pipe.write(pickle.dumps(plan_traj))
-            print('sent')
-        else:
+        if results is None:
+            # Tell AETHER to stop instead of leaving it waiting on plan_pipe.
             with open(plan_pipe, "wb") as pipe:
                 pipe.write(pickle.dumps(None))
             print('Waiting for visualize tasks...')
-            for process in vis_process_pool:
-                process.join()
-            to_video(output_folder)
-            exit(0)
+            _finish_visualization(vis_process_pool, output_folder)
+            exit(1)
+
+        plan_traj = results[0]['planning']['result_planning']['sdc_traj'][0].detach().cpu().numpy()
+        with open(plan_pipe, "wb") as pipe:
+            pipe.write(pickle.dumps(plan_traj))
+        print('sent')
+
+        if VISUALIZE:
+            # results post processing for the visualizer; everything is moved to
+            # CPU first because the worker is a forked process and must not
+            # touch the parent's CUDA context.
+            vis = _to_cpu(results[0])
+            vis['planning_traj'] = vis['planning']['result_planning']['sdc_traj'].numpy()
+            vis['pts_bbox']['score_list'] = vis['pts_bbox']['score_list'].numpy()
+            vis['pts_bbox']['lane_score'] = vis['pts_bbox']['lane_score'].numpy()
+            vis['command'] = data['command'][0].cpu().numpy()
+            save_fn = osp.join(output_folder, f'{str(cnt).zfill(4)}')
+            # Bound the number of concurrent workers.
+            while len([p for p in vis_process_pool if p.is_alive()]) >= MAX_VIS_WORKERS:
+                time.sleep(0.05)
+            process = multiprocessing.Process(target=_safe_visualize,
+                                              args=(vis, raw_images, save_fn))
+            vis_process_pool.append(process)
+            process.start()
 
         cnt += 1
 

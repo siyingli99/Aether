@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 import math
 import numpy as np
 
-from .actor import Actor, ActorState
+from .actor import Actor, ActorState, _ds_axes
 
 
 class ActorPolicy(ABC):
@@ -34,11 +34,12 @@ class LogReplayPolicy(ActorPolicy):
     """
     name = "log_replay"
 
-    def __init__(self, trajectory: Dict[int, np.ndarray]):
+    def __init__(self, trajectory: Dict[int, np.ndarray], frame_dt: float = 0.1):
         self.trajectory: Dict[int, np.ndarray] = {
             int(k): np.asarray(v, dtype=np.float32) for k, v in trajectory.items()
         }
         self._frames = sorted(self.trajectory.keys())
+        self.frame_dt = float(frame_dt)
 
     def step(self, *, actor: Actor, frame_idx: int, scene) -> Optional[ActorState]:
         c2w = self.trajectory.get(int(frame_idx))
@@ -46,10 +47,11 @@ class LogReplayPolicy(ActorPolicy):
             return None
         velo = float(actor.state.velo)
         if frame_idx - 1 in self.trajectory:
+            fwd_ax, lat_ax, _, _ = _ds_axes()
             prev = self.trajectory[frame_idx - 1]
-            dx = float(c2w[0, 3] - prev[0, 3])
-            dz = float(c2w[2, 3] - prev[2, 3])
-            velo = math.hypot(dx, dz) / 0.1
+            d_fwd = float(c2w[fwd_ax, 3] - prev[fwd_ax, 3])
+            d_lat = float(c2w[lat_ax, 3] - prev[lat_ax, 3])
+            velo = math.hypot(d_fwd, d_lat) / self.frame_dt
         return ActorState.from_c2w(c2w, velo=velo)
 
     def serialize(self) -> Dict[str, Any]:
@@ -128,6 +130,9 @@ class IDMFollowerPolicy(ActorPolicy):
         self.lateral_window = float(lateral_window)
         self._initialized: Dict[int, bool] = {}
 
+    def reset(self) -> None:
+        self._initialized.clear()
+
     def _init_state(self, actor: Actor) -> ActorState:
         s = actor.state
         if s.velo == 0.0:
@@ -180,14 +185,18 @@ class IDMFollowerPolicy(ActorPolicy):
                 "dt": self.dt, "lateral_window": self.lateral_window}
 
 
-def policy_from_dict(d: Dict[str, Any]) -> ActorPolicy:
-    """Reconstruct a policy from its ``serialize()`` dict."""
+def policy_from_dict(d: Dict[str, Any], default_dt: float = 0.1) -> ActorPolicy:
+    """Reconstruct a policy from its ``serialize()`` dict.
+
+    ``default_dt`` is the time between two policy updates; the driving env
+    passes the closed-loop step (``kinematic.dt``) when the YAML omits ``dt``.
+    """
     t = d.get("type")
     if t == "manual":
         return ManualOverridePolicy(d.get("keyframes", {}))
     if t == "idm":
         p = IDMParams(**d.get("params", {}))
-        return IDMFollowerPolicy(params=p, dt=d.get("dt", 0.1),
+        return IDMFollowerPolicy(params=p, dt=d.get("dt", default_dt),
                                  lateral_window=d.get("lateral_window", 2.5))
     if t == "log_replay":
         raise ValueError("log_replay must be reconstructed with explicit trajectory")

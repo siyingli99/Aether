@@ -67,6 +67,18 @@ def _load_4x4(path: Path) -> np.ndarray:
     return np.loadtxt(str(path)).astype(np.float64).reshape(4, 4)
 
 
+# Seconds between consecutive DriveStudio frames when the scenario does not
+# set ``data_frame_dt``.  It depends on preprocessing: nuScenes with
+# ``interpolate_N=4`` and PandaSet are 10 Hz, nuScenes keyframes only are 2 Hz
+# (e.g. the demo scene-0088), so set it explicitly per scenario.
+_DEFAULT_DATA_FRAME_DT = 0.1
+
+
+def _heading_from_rotation(R_env: np.ndarray) -> float:
+    """CCW yaw of an object's +x (heading) axis in the env (x=fwd, y=left) plane."""
+    return float(math.atan2(float(R_env[1, 0]), float(R_env[0, 0])))
+
+
 def _ego_pose_ds(vab, vr) -> np.ndarray:
     """Pandaset DS-world ego pose (z-up). Original/tested formula."""
     yaw_h = float(vr[1])
@@ -111,6 +123,22 @@ def _ego_pose_ds_nuscenes(vab, vr) -> np.ndarray:
     return T
 
 
+def _ground_layer(heights: np.ndarray, window: float = 0.25,
+                  min_share: float = 0.5) -> float:
+    """Ground height of one BEV cell from its sorted point heights.
+
+    Gaussian-splat reconstructions leave sparse floaters below the road, so a
+    low quantile sits under the true surface and the road itself then looks
+    like a 0.3-0.6 m obstacle.  Instead take the lowest ``window``-thick layer
+    holding at least ``min_share`` of the densest layer's points (the road,
+    unless the cell is mostly wall or canopy) and return its median.
+    """
+    ends = np.searchsorted(heights, heights + window, side="right")
+    counts = ends - np.arange(len(heights))
+    start = int(np.flatnonzero(counts >= min_share * counts.max())[0])
+    return float(np.median(heights[start:ends[start]]))
+
+
 class _SceneActorAdapter:
     """Bridges :class:`aether.sim.Scene` to the legacy ``ActorReplay`` API
     (``pose_at(frame_idx)``) used by ``AetherDrivingEnv``.
@@ -129,7 +157,7 @@ class _SceneActorAdapter:
         # consistent with ``_ego_box_envframe`` (x = vt2, y = -vt0).
         x_bev = float(e.vab[1])
         y_bev = -float(e.vab[0])
-        yaw_bev = float(e.vr[1])
+        yaw_bev = -float(e.vr[1])   # BicycleEgo yaw is right-positive
         self.scene.update_ego(x=x_bev, y=y_bev, yaw=yaw_bev,
                               velo=float(e.velo))
 
@@ -146,6 +174,17 @@ class AetherDrivingEnv(gym.Env):
         self.cfg = cfg
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
+        # ``legacy_compat: true`` reproduces pre-2026-10 numbers: ego collision
+        # box at camera height, global-ground obstacle band, P@R@P^T actor
+        # yaw and frame index == step count.  Keep false for new experiments.
+        self.legacy_compat = bool(getattr(cfg.scenario, "legacy_compat", False))
+        _frame_dt = getattr(cfg.scenario, "data_frame_dt", None)
+        self._data_frame_dt_explicit = _frame_dt is not None
+        self.data_frame_dt = float(_DEFAULT_DATA_FRAME_DT if _frame_dt is None else _frame_dt)
+        if self.data_frame_dt <= 0:
+            raise ValueError("scenario.data_frame_dt must be positive")
+        self._ego_pose_cache: tuple | None = None
+        self._ground_cache: dict = {}
 
         ckpt = cfg.scenario.checkpoint
         traffic_cfg = getattr(cfg.scenario, "traffic", None)
@@ -205,6 +244,8 @@ class AetherDrivingEnv(gym.Env):
             self._scene = scene_from_scenario_actors(
                 getattr(cfg.scenario, "actors", []) or [],
                 traffic_log=_tl,
+                sim_dt=self.ego.dt,
+                frame_dt=self._frame_dt,
             )
             self.actors = _SceneActorAdapter(self._scene, self)
 
@@ -405,6 +446,8 @@ class AetherDrivingEnv(gym.Env):
                 ]
             )
         route = np.asarray(points, dtype=np.float64)
+        # Logged ego centres in DS (lateral, forward) for free-space carving.
+        self._logged_bev = np.stack([-route[:, 1], route[:, 0]], axis=1) if len(route) else route
         if len(route) < 2:
             raise RuntimeError(
                 f"route requires at least two logged poses: {route_source}"
@@ -419,6 +462,11 @@ class AetherDrivingEnv(gym.Env):
             [[0.0], np.cumsum(self._route_lengths)]
         )
         self._route_total = float(self._route_lengths.sum())
+        if len(lengths) and not self.legacy_compat:
+            speed = float(np.median(lengths)) / self.data_frame_dt
+            source = "scenario" if self._data_frame_dt_explicit else "DEFAULT, set scenario.data_frame_dt"
+            print(f"[time] data_frame_dt={self.data_frame_dt:g}s ({source}); "
+                  f"logged ego speed median {speed:.1f} m/s over {len(route)} frames", flush=True)
 
     def _route_progress(self) -> float:
         """Project ego center onto the logged route and return [0, 1] progress."""
@@ -447,7 +495,7 @@ class AetherDrivingEnv(gym.Env):
         import torch
         # Termination knobs (read early so they're available to band filter).
         self.term_bg_collision = bool(getattr(term, "bg_collision", True)) if term is not None else True
-        self.bg_collision_threshold = int(getattr(term, "bg_threshold", 50)) if term is not None else 100
+        self.bg_collision_threshold = int(getattr(term, "bg_threshold", 50)) if term is not None else 50
         self.ground_query_radius = float(getattr(term, "ground_query_radius", 4.0)) if term is not None else 4.0
         self.ground_quantile = float(getattr(term, "ground_quantile", 0.10)) if term is not None else 0.10
         self.term_follow_ground = bool(getattr(term, "follow_ground", True)) if term is not None else True
@@ -457,6 +505,19 @@ class AetherDrivingEnv(gym.Env):
         self.bg_obstacle_min_h = float(getattr(term, "bg_obstacle_min_h", 0.30)) if term is not None else 0.30
         self.bg_obstacle_max_h = float(getattr(term, "bg_obstacle_max_h", 2.50)) if term is not None else 2.50
         self.bg_opacity_min    = float(getattr(term, "bg_opacity_min", 0.30))    if term is not None else 0.30
+        # Cell size (m) of the BEV grid used to estimate the local ground
+        # under each Background gaussian for the obstacle band.
+        self.ground_cell_size  = float(getattr(term, "ground_cell_size", 2.0))   if term is not None else 2.0
+        # Splat reconstructions leave isolated high-opacity floaters in the
+        # driving corridor.  Obstacle splats need ``bg_min_neighbors`` other
+        # obstacle splats within ``bg_neighbor_radius`` metres (real kerbs,
+        # cars and walls are dense; floaters are not).
+        self.bg_min_neighbors  = int(getattr(term, "bg_min_neighbors", 8))       if term is not None else 8
+        self.bg_neighbor_radius = float(getattr(term, "bg_neighbor_radius", 0.3)) if term is not None else 0.3
+        # The recorded vehicle physically occupied its logged boxes, so any
+        # splat inside them is non-physical: carve them out of the obstacles.
+        self.carve_logged_route = bool(getattr(term, "carve_logged_route", True)) if term is not None else True
+        self._bg_bev_tree_all = None
         # Off-scene termination: if the ego BEV centre is further than
         # `off_scene_radius` metres from every obstacle-band BG point for
         # `off_scene_streak` consecutive steps, treat it as a bg collision
@@ -481,29 +542,43 @@ class AetherDrivingEnv(gym.Env):
                 lat_axis = self._ds_lat_axis
                 fwd_axis = self._ds_fwd_axis
                 up_axis  = self._ds_up_axis
-                # Global ground reference along the up axis, derived from the
-                # bulk of high-opacity points (a robust quantile is sturdier
-                # than the per-point KNN trick, which classified wall tops as
-                # obstacles and wall mid-heights as ground).
-                ys = pts_all_np[:, up_axis]
-                if self._ds_up_sign < 0:
-                    # nuscenes: up = -y, ground = high y
-                    ground_y = float(np.quantile(ys, 0.90))
-                    above = ground_y - ys
+                if self.legacy_compat:
+                    # Pre-2026-10 behaviour: one global ground plane for the
+                    # whole scene.  On sloped or multi-level scenes this puts
+                    # the obstacle band at the wrong height.
+                    ys = pts_all_np[:, up_axis]
+                    if self._ds_up_sign < 0:
+                        ground_y = float(np.quantile(ys, 0.90))
+                        above = ground_y - ys
+                    else:
+                        ground_y = float(np.quantile(ys, 0.10))
+                        above = ys - ground_y
                 else:
-                    ground_y = float(np.quantile(ys, 0.10))
-                    above = ys - ground_y
+                    above = self._height_above_local_ground(pts_all_np)
                 obstacle_mask = (above > self.bg_obstacle_min_h) & (above < self.bg_obstacle_max_h)
+                if not self.legacy_compat:
+                    obstacle_mask = self._filter_obstacles(pts_all_np, above, obstacle_mask)
                 pts_obs_np = pts_all_np[obstacle_mask]
                 pts_obs = pts_all[torch.from_numpy(obstacle_mask).to(pts_all.device)].contiguous()
                 self._bg_points = pts_obs       # obstacle-only, for collision
                 self._bg_points_np = pts_all_np  # full, for ground query
-                # BEV KDTree over the obstacle band -> used to detect when
-                # ego drives outside the reconstructed scene.
+                self._bg_bev_tree_all = None
                 try:
                     from scipy.spatial import cKDTree
-                    if len(pts_obs_np) > 0:
-                        self._scene_bev_tree = cKDTree(pts_obs_np[:, [lat_axis, fwd_axis]])
+                    if len(pts_all_np) > 0:
+                        self._bg_bev_tree_all = cKDTree(pts_all_np[:, [lat_axis, fwd_axis]])
+                except Exception as _e:
+                    print(f"[ground] BEV tree unavailable, using brute force: {_e}")
+                # BEV KDTree used to detect when the ego drives outside the
+                # reconstructed scene.  Use every high-opacity splat (road
+                # surface included): with floaters filtered out, the nearest
+                # *obstacle* can be >5 m away in the middle of a wide road
+                # (7/196 logged poses on scene-0383).
+                try:
+                    from scipy.spatial import cKDTree
+                    scene_pts = pts_obs_np if self.legacy_compat else pts_all_np
+                    if len(scene_pts) > 0:
+                        self._scene_bev_tree = cKDTree(scene_pts[:, [lat_axis, fwd_axis]])
                     else:
                         self._scene_bev_tree = None
                 except Exception as _e:
@@ -516,6 +591,7 @@ class AetherDrivingEnv(gym.Env):
             self._bg_points = None
             self._bg_points_np = None
             self._scene_bev_tree = None
+            self._bg_bev_tree_all = None
         # Reference ground at start; use only deltas so the camera keeps its
         # training-time mount height (do NOT bury the camera by adding the
         # absolute ground_y, which on nuscenes is ~+2.08m DS_y).
@@ -523,6 +599,49 @@ class AetherDrivingEnv(gym.Env):
         self._ground_ref = float(gh0) if gh0 is not None else 0.0
         if gh0 is not None:
             print(f"[ground] reference height (DS up-axis) = {self._ground_ref:.3f}")
+
+    def _filter_obstacles(self, pts: np.ndarray, above: np.ndarray,
+                          mask: np.ndarray) -> np.ndarray:
+        """Drop isolated floaters and splats inside the logged ego boxes."""
+        from scipy.spatial import cKDTree
+        mask = mask.copy()
+        index = np.flatnonzero(mask)
+        n_band = len(index)
+        if self.bg_min_neighbors > 0 and len(index):
+            candidates = pts[index]
+            neighbours = cKDTree(candidates).query_ball_point(
+                candidates, r=self.bg_neighbor_radius, return_length=True
+            ) - 1
+            mask[index[neighbours < self.bg_min_neighbors]] = False
+        n_dense = int(mask.sum())
+        logged = getattr(self, "_logged_bev", None)
+        if self.carve_logged_route and logged is not None and len(logged) >= 2:
+            index = np.flatnonzero(mask)
+            bev = pts[index][:, [self._ds_lat_axis, self._ds_fwd_axis]]
+            tree = cKDTree(bev)
+            w, h, l = (float(v) for v in self.whl)
+            heading = np.diff(logged, axis=0)
+            heading = np.vstack([heading, heading[-1:]])
+            carve = np.zeros(len(index), dtype=bool)
+            last = np.array([0.0, 1.0])
+            for centre, step in zip(logged, heading):
+                norm = float(np.hypot(*step))
+                if norm > 1e-3:
+                    last = step / norm      # (d_lat, d_fwd) unit heading
+                near = tree.query_ball_point(centre, r=0.5 * math.hypot(l, w))
+                if not near:
+                    continue
+                near = np.asarray(near)
+                rel = bev[near] - centre
+                along = rel @ last
+                across = rel[:, 0] * last[1] - rel[:, 1] * last[0]
+                inside = (np.abs(along) < 0.5 * l) & (np.abs(across) < 0.5 * w) \
+                    & (above[index[near]] < h)
+                carve[near[inside]] = True
+            mask[index[carve]] = False
+        print(f"[bg_collision] obstacle splats: band={n_band}, dense={n_dense}, "
+              f"after logged-route carving={int(mask.sum())}")
+        return mask
 
     def _ground_height_at(self, vab0: float, vab1: float):
         """Return DS-world height (signed along DS up axis) of ground at the
@@ -533,9 +652,22 @@ class AetherDrivingEnv(gym.Env):
         ground (positive number, since cam-front origin sits above ground).
         For pandaset (DS_z is up) the returned value is the ground's DS_z.
         Returns None if no points available.
+
+        Results are memoised per position: one closed-loop step queries the
+        same ego position once per camera plus collision checks.
         """
         if self._bg_points_np is None or len(self._bg_points_np) == 0:
             return None
+        key = (round(float(vab0), 6), round(float(vab1), 6))
+        cache = self.__dict__.setdefault("_ground_cache", {})
+        if key in cache:
+            return cache[key]
+        if len(cache) > 4096:
+            cache.clear()
+        cache[key] = value = self._ground_height_uncached(float(vab0), float(vab1))
+        return value
+
+    def _ground_height_uncached(self, vab0: float, vab1: float):
         pts = self._bg_points_np
         # In DS world the (lateral, forward) of ego maps to specific DS axes.
         # nuscenes: lat = vab0 -> DS_x, fwd = vab1 -> DS_z.
@@ -543,25 +675,81 @@ class AetherDrivingEnv(gym.Env):
         lat_axis = self._ds_lat_axis
         fwd_axis = self._ds_fwd_axis
         up_axis  = self._ds_up_axis
-        # Note: for pandaset _ego_pose_ds places ego at DS=(vab[1], vab[0], 0)
-        # so x=vab[1]=fwd_in_DS, y=vab[0]=lat_in_DS (already accounted for above).
-        d2 = (pts[:, lat_axis] - vab0) ** 2 + (pts[:, fwd_axis] - vab1) ** 2
-        r2 = self.ground_query_radius ** 2
-        m = d2 < r2
-        if m.sum() < 8:
-            # Fall back to nearest 32 points if the radius is too small.
-            k = min(32, len(pts))
-            idx = np.argpartition(d2, k - 1)[:k]
-            ys = pts[idx, up_axis]
+        tree = getattr(self, "_bg_bev_tree_all", None)
+        if tree is not None:
+            idx = tree.query_ball_point([vab0, vab1], r=self.ground_query_radius)
+            if len(idx) < 8:
+                # Fall back to nearest 32 points if the radius is too small.
+                k = min(32, len(pts))
+                _, idx = tree.query([vab0, vab1], k=k)
+            ys = pts[np.atleast_1d(idx), up_axis]
         else:
-            ys = pts[m, up_axis]
+            d2 = (pts[:, lat_axis] - vab0) ** 2 + (pts[:, fwd_axis] - vab1) ** 2
+            m = d2 < self.ground_query_radius ** 2
+            if m.sum() < 8:
+                k = min(32, len(pts))
+                ys = pts[np.argpartition(d2, k - 1)[:k], up_axis]
+            else:
+                ys = pts[m, up_axis]
         # For nuscenes (DS_y down): "ground" = high-y -> upper quantile.
         # For pandaset (DS_z up):   "ground" = low-z  -> lower quantile.
         if self._ds_up_sign < 0:
-            # ground = high-y: take 1-quantile
             return float(np.quantile(ys, 1.0 - self.ground_quantile))
-        else:
-            return float(np.quantile(ys, self.ground_quantile))
+        return float(np.quantile(ys, self.ground_quantile))
+
+    def _height_above_local_ground(self, pts: np.ndarray,
+                                   min_points: int = 8) -> np.ndarray:
+        """Height of every point above the ground of its BEV grid cell.
+
+        Sparse cells borrow the ground of the nearest dense cell, so walls and
+        parked cars on a slope are measured from the road next to them rather
+        than from a single scene-wide ground plane.  The grid is kept for
+        :meth:`_local_ground_ds`, which places the ego box on the same ground.
+        """
+        up = self._ds_up_sign * pts[:, self._ds_up_axis]          # larger = higher
+        bev = pts[:, [self._ds_lat_axis, self._ds_fwd_axis]]
+        cell = max(self.ground_cell_size, 1e-3)
+        cells = np.floor(bev / cell).astype(np.int64)
+        keys, inverse = np.unique(cells, axis=0, return_inverse=True)
+        inverse = inverse.reshape(-1)
+        order = np.lexsort((up, inverse))                          # by cell, then height
+        counts = np.bincount(inverse, minlength=len(keys))
+        starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+        up_sorted = up[order]
+        ground = np.full(len(keys), np.nan)
+        for index in np.flatnonzero(counts >= min_points):
+            heights = up_sorted[starts[index]:starts[index] + counts[index]]
+            ground[index] = _ground_layer(heights)
+        dense = np.isfinite(ground)
+        if dense.any() and not dense.all():
+            from scipy.spatial import cKDTree
+            centers = keys.astype(np.float64)
+            _, nearest = cKDTree(centers[dense]).query(centers[~dense], k=1)
+            ground[~dense] = ground[dense][nearest]
+        if not dense.any():
+            ground[:] = np.quantile(up, self.ground_quantile)
+        self._ground_grid = {
+            (int(i), int(j)): float(g) for (i, j), g in zip(keys, ground)
+        }
+        self._ground_grid_tree = None
+        return up - ground[inverse]
+
+    def _local_ground_ds(self, vab0: float, vab1: float) -> float | None:
+        """DS up-axis coordinate of the grid ground under (lateral, forward)."""
+        grid = getattr(self, "_ground_grid", None)
+        if not grid:
+            return None
+        cell = max(self.ground_cell_size, 1e-3)
+        key = (int(math.floor(vab0 / cell)), int(math.floor(vab1 / cell)))
+        value = grid.get(key)
+        if value is None:
+            if getattr(self, "_ground_grid_tree", None) is None:
+                from scipy.spatial import cKDTree
+                self._ground_grid_keys = list(grid)
+                self._ground_grid_tree = cKDTree(np.asarray(self._ground_grid_keys, dtype=np.float64))
+            _, nearest = self._ground_grid_tree.query(key, k=1)
+            value = grid[self._ground_grid_keys[int(nearest)]]
+        return float(value) * self._ds_up_sign
 
     def _ego_box_8corners_ds(self) -> np.ndarray:
         """Return ego 3D box (8 corners) in DS world coordinates.
@@ -585,6 +773,15 @@ class AetherDrivingEnv(gym.Env):
             ax_h = R[:, 2]      # +z body
         # Origin at ground under ego center.  Corners encode +/- l/2, +/- w/2, [0, h].
         # HUGSIM's parallelepiped uses: O, A=+L, B=+W, C(idx 5)=+H.
+        # ``t`` is the camera-anchored ego pose, i.e. ~2 m above the road on
+        # nuScenes; drop the box base onto the local ground.
+        if not self.legacy_compat:
+            gh = self._local_ground_ds(float(self.ego.vab[0]), float(self.ego.vab[1]))
+            if gh is None:
+                gh = self._ground_height_at(float(self.ego.vab[0]), float(self.ego.vab[1]))
+            if gh is not None:
+                t = t.copy()
+                t[self._ds_up_axis] = gh
         O = t - 0.5 * l * ax_l - 0.5 * w * ax_w
         A = O + l * ax_l
         B = O + w * ax_w
@@ -624,7 +821,7 @@ class AetherDrivingEnv(gym.Env):
 
     def _off_scene_check(self) -> bool:
         """True if the ego BEV centre has been further than `off_scene_radius`
-        metres from every obstacle-band BG point for `off_scene_streak`
+        metres from every high-opacity BG point for `off_scene_streak`
         consecutive steps. Catches the common failure mode where the planner
         drifts off the reconstructed road into empty space, where there are
         no gaussians for `_bg_collision` to register a hit against.
@@ -722,8 +919,25 @@ class AetherDrivingEnv(gym.Env):
         return out
 
     @property
+    def _frame_dt(self) -> float:
+        """Seconds between consecutive DriveStudio frames."""
+        return float(self.ego.dt) if self.legacy_compat else self.data_frame_dt
+
+    @property
     def frame_idx(self) -> int:
-        return int(round(self.timestamp / self.ego.dt))
+        """DriveStudio frame index for the current simulation time.
+
+        The renderer, recorded actors and appearance embeddings are indexed by
+        dataset frames (10 Hz), not by closed-loop steps (``kinematic.dt``).
+        """
+        # Half-up rounding with a small epsilon: 0.75 s / 0.1 s is 7.4999...
+        # in floating point and must map to frame 8 deterministically.
+        return int(math.floor(self.timestamp / self._frame_dt + 0.5 + 1e-9))
+
+    @property
+    def data_frame(self) -> int:
+        """``frame_idx`` clamped to the reconstructed sequence."""
+        return min(self.frame_idx, self._max_frame)
 
     def _ego_c2w_ds(self) -> np.ndarray:
         if getattr(self, "_ds_dataset", "pandaset") == "nuscenes":
@@ -761,7 +975,7 @@ class AetherDrivingEnv(gym.Env):
             )
 
     def _get_obs(self) -> Dict:
-        f = min(self.frame_idx, self._max_frame)
+        f = self.data_frame
         self._inject_actors(f)
         rgbs, depths = {}, {}
         camera_only = bool(getattr(self, "obs_cameras_only", True))
@@ -811,7 +1025,7 @@ class AetherDrivingEnv(gym.Env):
         P[0, fwd_ax] = 1.0
         P[1, lat_ax] = -1.0   # DS lat is right-positive, env y is left.
         P[2, up_ax]  = up_sign
-        for entry in self.actors.pose_at(self.frame_idx):
+        for entry in self.actors.pose_at(self.data_frame):
             if "x" in entry and "y" in entry:
                 # Traffic providers already report canonical road-local
                 # coordinates (x forward, y left, yaw CCW). Avoid trying to
@@ -824,14 +1038,21 @@ class AetherDrivingEnv(gym.Env):
                 ])
                 continue
             T_world_ds = np.asarray(entry["c2w"], dtype=np.float32)
-            R_env = (P @ T_world_ds[:3, :3] @ P.T).astype(np.float32)
-            yaw_env = float(SCR.from_matrix(R_env).as_euler("ZYX")[0])
             t_env = P @ T_world_ds[:3, 3]   # absolute (fwd, left, up) env world
             w, l, h = entry["size"]
-            # Match _ego_box_envframe: [box0=fwd, box1=left, box2=up, w,l,h, -yaw]
+            if self.legacy_compat:
+                # Pre-2026-10: conjugating by P treats the object's canonical
+                # axes as DS axes and rotates every box by about -90 degrees.
+                R_env = (P @ T_world_ds[:3, :3] @ P.T).astype(np.float32)
+                yaw_box = -float(SCR.from_matrix(R_env).as_euler("ZYX")[0])
+            else:
+                # DriveStudio rigid canonical axes are x=heading, z=up, so the
+                # object->env rotation is P @ R and its +x axis is the heading.
+                # Box yaw is CCW, matching _ego_box_envframe and traffic boxes.
+                yaw_box = _heading_from_rotation(P @ T_world_ds[:3, :3])
             boxes.append([
                 float(t_env[0]), float(t_env[1]), float(t_env[2]),
-                float(w), float(l), float(h), -yaw_env,
+                float(w), float(l), float(h), yaw_box,
             ])
         return boxes
 
@@ -868,6 +1089,8 @@ class AetherDrivingEnv(gym.Env):
         # CCD bookkeeping: cache previous ego/object poses for sweep tests.
         self._prev_ego_box = None
         self._prev_obj_boxes = None
+        if self._scene is not None:
+            self._scene.reset()
         if self._traffic_provider is not None:
             self._traffic_provider.reset(self._traffic_ego_state())
         return self._get_obs(), self._get_info()

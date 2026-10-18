@@ -11,6 +11,15 @@ import os
 import mmcv
 import mediapy as media
 
+# Camera metadata used to project predictions; resolved from the UniAD root
+# rather than the process working directory.
+_VIS_META = os.environ.get(
+    'UNIAD_VIS_META',
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                 'data_temp', 'nus_vis_pose_info.pkl'),
+)
+
+
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
 
@@ -164,7 +173,7 @@ def save_visualize_img(outputs, visual_imgs, save_fn):
 
     viser = Visualizer(**render_cfg)
     prediction_dict = viser._parse_predictions(outputs)
-    metas = mmcv.load('data_temp/nus_vis_pose_info.pkl')
+    metas = mmcv.load(_VIS_META)
     # breakpoint()
 
     image_dict = {} # TODO: surrounding images
@@ -206,6 +215,9 @@ def save_visualize_img(outputs, visual_imgs, save_fn):
 def to_video(folder_path, fps=5, downsample=1):
     imgs_path = glob.glob(os.path.join(folder_path, '*_combine.jpg'))
     imgs_path = sorted(imgs_path)
+    if not imgs_path:
+        print(f'[uniad-vis] no visualization frames in {folder_path}; skipping video')
+        return
     img_array = []
     for img_path in imgs_path:
         img = cv2.imread(img_path)

@@ -97,6 +97,27 @@ bash scripts/run_closed_loop.sh 088 --no_io_trace
 
 使用 `AETHER_CUDA=1` 可切换 GPU。结果位于 `aether_results/nuscenes/<scene>/uniad/limsim_camera/`，其中 `limsim_aether.mp4` 是 LimSim/AETHER 同步视频。
 
+| 环境变量 | 默认值 | 作用 |
+|---|---|---|
+| `AETHER_AD_READY_TIMEOUT` | `1800` | 等待适配器加载完成的秒数 |
+| `AETHER_AD_STEP_TIMEOUT` | `900` | 单次规划调用的超时秒数；适配器退出或卡死时，运行会报错并附上其日志末尾 |
+| `AETHER_ILQR_MAX_SOLVE_TIME` | 未设置 | iLQR 的墙钟时间上限；不设置时控制结果可复现（设为 `0.05` 可复现旧结果） |
+| `UNIAD_VIS` / `UNIAD_VIS_WORKERS` | `1` / `4` | UniAD 逐步可视化开关及其并发进程数 |
+
+#### 2026 年 10 月之前的结果
+
+2026 年 10 月的修复会改变闭环指标：
+- 背景碰撞盒改为放在局部地面上（之前悬在相机高度，`scene-0383` 上相当于离地 2.1–3.6 m）；
+- 障碍带改用局部地面而不是全场景统一的地面来计算高度；
+- 重建 actor 在 `obj_boxes` 中的朝向是正确的；
+- recorded actor 按数据帧率（`data_frame_dt`）推进，而不是每个 0.25 s 步长前进一帧；
+- 孤立的漂浮点、以及落在日志 ego 盒子内的点不再算作障碍；
+- 离开场景检测改为看到任意重建点（包括路面）的距离，而不是到障碍点的距离；
+- 刹车不再让 ego 倒车；
+- iLQR 不再按墙钟时间提前截断。
+
+如需复现之前的数字，在场景 YAML 中设置 `legacy_compat: true`，并设置环境变量 `AETHER_ILQR_MAX_SOLVE_TIME=0.05`。
+
 ## AETHER Studio
 
 ```bash
@@ -177,6 +198,11 @@ cp configs/scenarios/nuscenes_0383.yaml configs/scenarios/my_scene.yaml
 | `termination.fg_collision_min_overlap` | 车辆碰撞的最小包围框重叠比例 | `_fg_collision_swept()` |
 | `termination.bg_threshold` | 自车框内背景高斯球的碰撞阈值 | `_bg_collision()` |
 | `termination.off_scene_radius`, `off_scene_streak` | 离开重建区域的容差 | `_off_scene_check()` |
+| `termination.ground_cell_size` | 估计障碍带局部地面所用的 BEV 网格边长（米） | `_height_above_local_ground()` |
+| `data_frame_dt` | DriveStudio 相邻帧的时间间隔：10 Hz 预处理（scene-0383）填 `0.1`，仅关键帧的 nuScenes（scene-0088）填 `0.5` | `AetherDrivingEnv.frame_idx` |
+| `termination.bg_min_neighbors`, `bg_neighbor_radius` | 障碍点在该半径内至少要有这么多邻居（用于去掉孤立的漂浮点） | `_filter_obstacles()` |
+| `termination.carve_logged_route` | 去掉落在日志 ego 盒子内的点（录制车辆真实驶过的空间） | `_filter_obstacles()` |
+| `legacy_compat` | 设为 `true` 可复现 2026 年 10 月修复之前的结果（见下文） | `AetherDrivingEnv` |
 
 示例场景要求每次调用算法前六路图像均成功通过 Difix。相关参数定义在 `scripts/closed_loop.py`：
 

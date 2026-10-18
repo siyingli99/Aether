@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import math
 from pathlib import Path
 import socket
 import sys
@@ -169,10 +170,12 @@ class ReplayTrafficClient:
     def _interpolate(a: VehicleState, b: VehicleState, alpha: float) -> VehicleState:
         def lerp(x, y):
             return float(x) + alpha * (float(y) - float(x))
+        # Interpolate heading along the shorter arc (e.g. 179 deg -> -179 deg).
+        delta_yaw = (float(b.yaw) - float(a.yaw) + math.pi) % (2.0 * math.pi) - math.pi
         return VehicleState(
             vehicle_id=a.vehicle_id,
             x=lerp(a.x, b.x), y=lerp(a.y, b.y), z=lerp(a.z, b.z),
-            yaw=lerp(a.yaw, b.yaw), speed=lerp(a.speed, b.speed),
+            yaw=float(a.yaw) + alpha * delta_yaw, speed=lerp(a.speed, b.speed),
             length=lerp(a.length, b.length), width=lerp(a.width, b.width),
             height=lerp(a.height, b.height), vehicle_type=a.vehicle_type,
         )

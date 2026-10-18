@@ -105,6 +105,7 @@ class StudioActorManager:
             self.external_slots = {
                 actor.id: slot for actor, slot in zip(self.external_specs, self.pool.instance_ids)
             }
+        self._asset_index = {actor.id: index for index, actor in enumerate(self.external_specs)}
 
         self._configure_visibility()
         self.plugins: dict[str, PluginController] = {}
@@ -132,6 +133,7 @@ class StudioActorManager:
             self.limsim = TrafficActorProvider(client, transform, slots)
 
         self._entries: list[dict[str, Any]] = []
+        self._entries_key: tuple[int, float] | None = None
 
     @property
     def frame(self):
@@ -178,35 +180,46 @@ class StudioActorManager:
         indices = np.flatnonzero(frames == int(frame_idx))
         return None if indices.size == 0 else self.log[c2w_key][int(indices[0])].astype(np.float32)
 
-    def _pose_for(self, actor: ActorEdit, frame_idx: int) -> np.ndarray | None:
+    def _pose_for(self, actor: ActorEdit, frame_idx: int, time_s: float) -> np.ndarray | None:
         if actor.controller.kind == "recorded":
             recorded = self._recorded(actor, frame_idx)
             if recorded is not None:
                 return recorded
             pose = actor.start
         elif actor.controller.kind == "open_loop":
-            pose = _interpolate(actor.controller.trajectory, frame_idx * self.dt)
+            pose = _interpolate(actor.controller.trajectory, time_s)
         elif actor.controller.kind == "plugin":
-            pose = self.plugins[actor.id].step(frame_idx * self.dt, actor, self.env._traffic_ego_state())
+            pose = self.plugins[actor.id].step(time_s, actor, self.env._traffic_ego_state())
         else:
             return None
         if pose is None:
             return None
         height = float((actor.size or (2.0, 4.5, 1.5))[2])
         if actor.id in self.external_slots and self.pool is not None:
-            asset_index = list(self.external_slots).index(actor.id)
-            height = float(self.pool.assets[asset_index].size_lwh[2])
+            height = float(self.pool.assets[self._asset_index[actor.id]].size_lwh[2])
         centered = RoadPose(x=pose.x, y=pose.y, z=pose.z + height * 0.5, yaw=pose.yaw)
         return road_pose_to_nuscenes_ds(
             centered, ground_ds_y=float(getattr(self.env, "_ground_ref", 0.0))
         )
 
     def pose_at(self, frame_idx: int) -> list[dict[str, Any]]:
+        """Return actor poses for the env's current time.
+
+        The env calls this several times per step (render, collision, info);
+        plugin controllers may be stateful, so they are stepped once per
+        simulation time and the result is cached.  ``frame_idx`` selects the
+        recorded DriveStudio frame; open-loop and plugin controllers use the
+        simulation clock.
+        """
+        time_s = float(getattr(self.env, "timestamp", frame_idx * self.dt))
+        key = (int(frame_idx), round(time_s, 9))
+        if key == self._entries_key:
+            return list(self._entries)
         entries: list[dict[str, Any]] = []
         for actor in self.spec.actors:
             if actor.operation == "remove" or actor.controller.kind == "limsim":
                 continue
-            matrix = self._pose_for(actor, frame_idx)
+            matrix = self._pose_for(actor, frame_idx, time_s)
             if matrix is None:
                 continue
             node_class = "RigidNodes" if actor.id in self.external_slots else actor.node_class
@@ -214,8 +227,7 @@ class StudioActorManager:
             if instance_id is None:
                 continue
             if actor.id in self.external_slots and self.pool is not None:
-                asset_index = list(self.external_slots).index(actor.id)
-                length, width, height = self.pool.assets[asset_index].size_lwh
+                length, width, height = self.pool.assets[self._asset_index[actor.id]].size_lwh
                 size = [width, length, height]
             else:
                 size = list(actor.size or (2.0, 4.5, 1.5))
@@ -231,19 +243,28 @@ class StudioActorManager:
         if self.limsim is not None:
             entries.extend(self.limsim.pose_at(frame_idx))
         self._entries = entries
+        self._entries_key = key
         return list(entries)
+
+    def _current_frame(self) -> int:
+        frame = getattr(self.env, "data_frame", None)
+        if frame is None:
+            frame = int(round(float(getattr(self.env, "timestamp", 0.0)) / self.dt))
+        return int(frame)
 
     def reset(self, ego=None) -> list[dict[str, Any]]:
         for plugin in self.plugins.values():
             plugin.reset()
         if self.limsim is not None:
             self.limsim.reset(ego)
-        return self.pose_at(0)
+        self._entries_key = None
+        return self.pose_at(self._current_frame())
 
     def advance(self, target_time_s: float, ego) -> list[dict[str, Any]]:
         if self.limsim is not None:
             self.limsim.advance(target_time_s, ego)
-        return self.pose_at(int(round(target_time_s / self.dt)))
+        self._entries_key = None
+        return self.pose_at(self._current_frame())
 
     def close(self) -> None:
         if self.limsim is not None:

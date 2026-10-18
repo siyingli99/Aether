@@ -61,11 +61,23 @@ class DriveStudioRenderer:
         # drivestudio's SMPL/sky/AABB loaders use paths relative to the
         # drivestudio repo root (e.g. "smpl_models/SMPL_NEUTRAL.pkl"),
         # so we must run with that as cwd while the trainer is being built.
-        _prev_cwd = os.getcwd()
-        os.chdir(str(DRIVESTUDIO_ROOT))
+        # Resolve the checkpoint against the caller's cwd *before* switching to
+        # the DriveStudio root, and restore the cwd on every exit path.
         ckpt_path = Path(ckpt_path).expanduser().resolve()
         if not ckpt_path.exists():
             raise FileNotFoundError(ckpt_path)
+        _prev_cwd = os.getcwd()
+        os.chdir(str(DRIVESTUDIO_ROOT))
+        try:
+            self._build(ckpt_path, device, excluded_model_classes, import_str)
+        finally:
+            os.chdir(_prev_cwd)
+        # Pose-override registry:
+        #   {(class_name, instance_id, frame_idx): (translation(3), quat_wxyz(4))}
+        self._actor_overrides: Dict[Tuple[str, int, int], Tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def _build(self, ckpt_path: Path, device: str,
+               excluded_model_classes: tuple[str, ...], import_str) -> None:
         self.ckpt_path = ckpt_path
         self.log_dir = ckpt_path.parent
         self.device = torch.device(device)
@@ -106,16 +118,11 @@ class DriveStudioRenderer:
             scene_aabb=meta["scene_aabb"],
             device=self.device,
         )
-        try:
-            self.trainer.resume_from_checkpoint(
-                ckpt_path=str(ckpt_path),
-                load_only_model=True,
-            )
-            self.trainer.set_eval()
-        finally:
-            os.chdir(_prev_cwd)
-        # Pose-override registry: {(class_name, instance_id, frame_idx): (4,4) tensor}
-        self._actor_overrides: Dict[Tuple[str, int, int], torch.Tensor] = {}
+        self.trainer.resume_from_checkpoint(
+            ckpt_path=str(ckpt_path),
+            load_only_model=True,
+        )
+        self.trainer.set_eval()
 
     # ------------------------------------------------------------------ #
     # Construction helpers
@@ -194,8 +201,14 @@ class DriveStudioRenderer:
         class_name: 'RigidNodes' | 'SMPLNodes' | 'DeformableNodes'
         c2w_4x4: object-to-world 4x4 in DriveStudio world frame (z-up).
         """
-        T = torch.as_tensor(c2w_4x4, dtype=torch.float32, device=self.device)
-        self._actor_overrides[(class_name, int(instance_id), int(frame_idx))] = T
+        # Convert once here: _apply_overrides runs for every camera render.
+        from scipy.spatial.transform import Rotation as SCR
+        pose = np.asarray(c2w_4x4, dtype=np.float64).reshape(4, 4)
+        q_xyzw = SCR.from_matrix(pose[:3, :3]).as_quat()
+        q_wxyz = torch.tensor([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]],
+                              dtype=torch.float32, device=self.device)
+        t = torch.as_tensor(pose[:3, 3], dtype=torch.float32, device=self.device)
+        self._actor_overrides[(class_name, int(instance_id), int(frame_idx))] = (t, q_wxyz)
 
     def clear_actor_overrides(self) -> None:
         self._actor_overrides.clear()
@@ -207,9 +220,8 @@ class DriveStudioRenderer:
         caller can restore them after the render, leaving the trainer state
         clean across steps.
         """
-        from scipy.spatial.transform import Rotation as SCR
         snapshot: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
-        for (cls, inst, f), pose in self._actor_overrides.items():
+        for (cls, inst, f), (t, q_wxyz) in self._actor_overrides.items():
             if f != frame_idx:
                 continue
             model = self.trainer.models.get(cls)
@@ -225,13 +237,8 @@ class DriveStudioRenderer:
                 if hasattr(model, "instances_fv"):
                     values.append(model.instances_fv[frame_idx].detach().clone())
                 snapshot[cls] = tuple(values)
-            t = pose[:3, 3]
-            R = pose[:3, :3].cpu().numpy()
-            q_xyzw = SCR.from_matrix(R).as_quat().astype(np.float32)
-            q_wxyz = torch.tensor([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]],
-                                  dtype=torch.float32, device=self.device)
             with torch.no_grad():
-                model.instances_trans[frame_idx, inst].copy_(t.to(self.device))
+                model.instances_trans[frame_idx, inst].copy_(t)
                 model.instances_quats[frame_idx, inst].copy_(q_wxyz)
                 if hasattr(model, "instances_fv"):
                     model.instances_fv[frame_idx, inst] = True

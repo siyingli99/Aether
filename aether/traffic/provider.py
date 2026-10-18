@@ -37,7 +37,23 @@ class TrafficActorProvider:
         self._vehicle_slots[vehicle_id] = slot
         return slot
 
+    def _release_departed(self, frame: TrafficFrame) -> None:
+        """Return slots of vehicles that left the simulation to the pool.
+
+        Without this, a long LimSim run exhausts the slots once ``capacity``
+        distinct vehicles have spawned and every later vehicle is dropped.
+        Freed slots are reused in sorted order so assignments stay
+        deterministic.
+        """
+        present = {vehicle.vehicle_id for vehicle in frame.vehicles}
+        departed = [vid for vid in self._vehicle_slots if vid not in present]
+        for vehicle_id in departed:
+            self._free_slots.append(self._vehicle_slots.pop(vehicle_id))
+        if departed:
+            self._free_slots.sort()
+
     def _consume(self, frame: TrafficFrame) -> list[dict]:
+        self._release_departed(frame)
         entries: list[dict] = []
         for vehicle in sorted(frame.vehicles, key=lambda item: item.vehicle_id):
             slot = self._assign_slot(vehicle.vehicle_id)

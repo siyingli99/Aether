@@ -5,7 +5,10 @@ Compatible with HUGSIM's `sim.utils.launch_ad`: same FIFO names and pickle
 protocol, so existing `e2e.sh` / `vad.sh` / `uniad.sh` scripts work as-is.
 """
 from __future__ import annotations
+import errno
+import fcntl
 import os
+import select
 import subprocess
 import time
 
@@ -13,11 +16,11 @@ import time
 def launch(shell_path: str, cuda_id: str, output_dir: str) -> subprocess.Popen:
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "ad_output.txt")
-    f = open(log_path, "w")
-    proc = subprocess.Popen(
-        ["bash", shell_path, str(cuda_id), output_dir],
-        stdout=f, stderr=f,
-    )
+    with open(log_path, "w") as f:
+        proc = subprocess.Popen(
+            ["bash", shell_path, str(cuda_id), output_dir],
+            stdout=f, stderr=f,
+        )
     print(f"[ad] launched {shell_path} (pid={proc.pid}) -> {log_path}")
     return proc
 
@@ -117,3 +120,86 @@ def make_pipes(output_dir: str):
         if not os.path.exists(p):
             os.mkfifo(p)
     return obs, plan
+
+
+# --------------------------------------------------------------------------- #
+# Timeout-aware FIFO IO
+# --------------------------------------------------------------------------- #
+# A plain ``open(fifo)`` blocks forever when the peer has died: opening for
+# write waits for a reader and opening for read waits for a writer.  These
+# helpers poll the adapter process while waiting, so a crashed planner turns
+# into an error with its log tail instead of a hung closed loop.
+
+def _log_tail(log_path: str | None, limit: int = 4000) -> str:
+    if not log_path:
+        return ""
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()[-limit:]
+    except OSError:
+        return ""
+
+
+def _check_peer(proc: subprocess.Popen | None, log_path: str | None,
+                deadline: float, what: str) -> None:
+    if proc is not None and proc.poll() is not None:
+        raise RuntimeError(
+            f"AD adapter exited with code {proc.returncode} while {what}.\n"
+            f"See log: {log_path}\n--- tail ---\n{_log_tail(log_path)}"
+        )
+    if time.monotonic() > deadline:
+        raise TimeoutError(
+            f"AD adapter did not respond in time while {what}.\n"
+            f"See log: {log_path}\n--- tail ---\n{_log_tail(log_path)}"
+        )
+
+
+def send_fifo(path: str, payload: bytes, proc: subprocess.Popen | None = None,
+              log_path: str | None = None, timeout_s: float = 600.0,
+              poll_s: float = 0.05) -> None:
+    """Write ``payload`` to a FIFO once the adapter opens it for reading."""
+    deadline = time.monotonic() + float(timeout_s)
+    while True:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            break
+        except OSError as error:
+            if error.errno != errno.ENXIO:  # ENXIO: no reader yet
+                raise
+        _check_peer(proc, log_path, deadline, f"waiting to send on {path}")
+        time.sleep(poll_s)
+    try:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+    finally:
+        os.close(fd)
+
+
+def recv_fifo(path: str, proc: subprocess.Popen | None = None,
+              log_path: str | None = None, timeout_s: float = 600.0,
+              poll_s: float = 0.5) -> bytes:
+    """Read one complete message (until the writer closes) from a FIFO."""
+    deadline = time.monotonic() + float(timeout_s)
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    chunks: list[bytes] = []
+    try:
+        while True:
+            readable, _, _ = select.select([fd], [], [], poll_s)
+            if readable:
+                try:
+                    data = os.read(fd, 1 << 20)
+                except BlockingIOError:
+                    data = None
+                if data:
+                    chunks.append(data)
+                    continue
+                if data == b"":
+                    # EOF: the writer connected and closed.
+                    return b"".join(chunks)
+            _check_peer(proc, log_path, deadline, f"waiting for {path}")
+    finally:
+        os.close(fd)

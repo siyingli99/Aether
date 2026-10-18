@@ -2,6 +2,9 @@ scene_name: nuscenes_088
 mode: limsim_camera
 checkpoint: ${aether:data/checkpoints/nuscenes_outputs/scene_recon_full/scene_88_6cams_with_humans/checkpoint_final.pth}
 
+# Seconds between DriveStudio frames: this scene was preprocessed at 2 Hz (nuScenes keyframes only).
+data_frame_dt: 0.5
+
 start_ab: [0.0, 0.0]
 start_euler: [0.0, 0.0, 0.0]
 start_velo: 2.0

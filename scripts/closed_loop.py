@@ -27,14 +27,16 @@ if _PY_BIN and _PY_BIN not in os.environ.get("PATH", ""):
     os.environ["PATH"] = _PY_BIN + os.pathsep + os.environ.get("PATH", "")
 
 import numpy as np
-from moviepy import ImageSequenceClip
 from PIL import Image, ImageDraw, ImageFont
 
 import aether  # noqa: F401  (sets sys.path for drivestudio + hugsim)
 from aether.config import load_cfg
 from aether.envs.driving_env import AetherDrivingEnv
 from aether.viz.bev import render_bev
-from aether.agents.launcher import launch, check_alive, make_pipes, wait_adapter_ready, assert_adapter_alive
+from aether.agents.launcher import (
+    assert_adapter_alive, check_alive, launch, make_pipes, recv_fifo, send_fifo,
+    wait_adapter_ready,
+)
 from aether.agents.registry import load_adapter, launch_adapter, list_adapters
 
 
@@ -117,11 +119,39 @@ def _camera_grid(obs):
     return np.concatenate([obs[c] for c in cams], axis=1)
 
 
-def _to_video(observations, out_path, fps=4):
-    if not observations:
-        return
-    frames = [_camera_grid(obs) for obs in observations]
-    ImageSequenceClip(frames, fps=fps).write_videofile(out_path, logger=None)
+class _VideoSink:
+    """Append frames to an MP4 as they are produced.
+
+    Keeping every six-camera frame in RAM until the end of an episode costs
+    ~6.5 MB per step at 450x800 (several GB for long runs); this streams them
+    through the same ffmpeg writer ``ImageSequenceClip.write_videofile`` uses.
+    """
+
+    def __init__(self, path, fps=4):
+        self.path = path
+        self.fps = fps
+        self.frames = 0
+        self._writer = None
+        self._size = None
+
+    def write(self, frame):
+        frame = np.ascontiguousarray(frame, dtype=np.uint8)
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError(f"video frame must be HxWx3, got {frame.shape}")
+        size = (int(frame.shape[1]), int(frame.shape[0]))
+        if self._writer is None:
+            from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
+            self._size = size
+            self._writer = FFMPEG_VideoWriter(self.path, size, self.fps, codec="libx264")
+        elif size != self._size:
+            frame = np.asarray(Image.fromarray(frame).resize(self._size, Image.Resampling.LANCZOS))
+        self._writer.write_frame(frame)
+        self.frames += 1
+
+    def close(self):
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
 
 
 def _resize_to_height(frame, height):
@@ -141,22 +171,12 @@ def _label(frame, text):
     return np.asarray(image)
 
 
-def _to_composite_video(observations, traffic_frames, out_path, fps=4):
-    """Write synchronized LimSim-2D | AETHER-3D frames."""
-    if not observations:
-        return
-    if len(observations) != len(traffic_frames):
-        raise RuntimeError(
-            f"composite streams differ: cameras={len(observations)}, "
-            f"traffic={len(traffic_frames)}"
-        )
-    frames = []
-    for obs, traffic in zip(observations, traffic_frames):
-        camera = _label(_camera_grid(obs), "AETHER 3D / Difix")
-        traffic = _label(traffic, "LimSim 2D / HD map")
-        traffic = _resize_to_height(traffic, camera.shape[0])
-        frames.append(np.concatenate((traffic, camera), axis=1))
-    ImageSequenceClip(frames, fps=fps).write_videofile(out_path, logger=None)
+def _composite_frame(camera_rgb, traffic):
+    """One synchronized LimSim-2D | AETHER-3D frame."""
+    camera = _label(_camera_grid(camera_rgb), "AETHER 3D / Difix")
+    traffic = _label(traffic, "LimSim 2D / HD map")
+    traffic = _resize_to_height(traffic, camera.shape[0])
+    return np.concatenate((traffic, camera), axis=1)
 
 
 def _rgb_digest(value):
@@ -280,6 +300,74 @@ class PerfTimer:
         print()
 
 
+def _refine_step(difix, obs, info, cnt, expected_cameras, difix_required, perf):
+    """Run Difix on one observation; returns ``(obs, audit_entry, ms)``.
+
+    With ``difix_required`` any failure raises, so raw renders never reach
+    the AD adapter.
+    """
+    t_r0 = time.perf_counter()
+    raw_rgb = {name: np.asarray(value) for name, value in obs["rgb"].items()}
+    audit_entry = {
+        "step": cnt,
+        "timestamp": float(info["timestamp"]),
+        "status": "failed",
+        "cameras": {},
+    }
+    with perf.section("difix_refine"):
+        try:
+            if len(raw_rgb) != expected_cameras:
+                raise RuntimeError(
+                    f"expected {expected_cameras} camera inputs, got {len(raw_rgb)}"
+                )
+            refined = difix.refine_obs_rgb(raw_rgb)
+            if set(refined) != set(raw_rgb):
+                raise RuntimeError(
+                    f"Difix camera set changed: input={sorted(raw_rgb)}, "
+                    f"output={sorted(refined)}"
+                )
+            checked = {}
+            for camera in sorted(raw_rgb):
+                input_image = raw_rgb[camera]
+                output_image = np.asarray(refined[camera])
+                if output_image.shape != input_image.shape:
+                    raise RuntimeError(
+                        f"Difix shape mismatch for {camera}: "
+                        f"{input_image.shape} -> {output_image.shape}"
+                    )
+                if output_image.dtype != np.uint8:
+                    raise RuntimeError(
+                        f"Difix output for {camera} must be uint8, "
+                        f"got {output_image.dtype}"
+                    )
+                checked[camera] = output_image
+                audit_entry["cameras"][camera] = {
+                    "shape": list(output_image.shape),
+                    "input_sha256": _rgb_digest(input_image),
+                    "output_sha256": _rgb_digest(output_image),
+                }
+            obs["rgb"] = checked
+            audit_entry["status"] = "success"
+        except Exception as e:
+            audit_entry["error"] = str(e)
+            if difix_required:
+                audit_entry["duration_ms"] = (time.perf_counter() - t_r0) * 1000.0
+                raise _MandatoryRefineError(audit_entry, cnt) from e
+            print(f"[difix] step {cnt}: refine failed ({e}); using raw")
+    t_refine_ms = (time.perf_counter() - t_r0) * 1000.0
+    audit_entry["duration_ms"] = t_refine_ms
+    return obs, audit_entry, t_refine_ms
+
+
+class _MandatoryRefineError(RuntimeError):
+    def __init__(self, audit_entry, step):
+        super().__init__(
+            f"mandatory Difix failed at step {step}; raw images "
+            "were not sent to the AD adapter"
+        )
+        self.audit_entry = audit_entry
+
+
 def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
         skip_io_trace: bool = False,
         refine: bool = False,
@@ -307,305 +395,279 @@ def run(cfg, output_dir: str, perf: "PerfTimer | None" = None,
             "this scenario requires Difix on every AD camera input; "
             "remove --no_refine"
         )
+    # Seconds the adapter may take for one plan (first call includes CUDA
+    # warm-up).  A dead or hung adapter fails the run instead of blocking.
+    step_timeout_s = float(os.environ.get("AETHER_AD_STEP_TIMEOUT", "900"))
+    plan_dt = float((ad_spec.output if ad_spec is not None else {}).get("dt", 0.5))
+
     t_wall0 = time.perf_counter()
-    with perf.section("env_init"):
-        env = AetherDrivingEnv(cfg, output_dir)
-    if ad_spec is not None and ad_spec.needs_depth:
-        print("[aether] adapter requests depth/lidar — ensure scenario.lidar.enabled")
-    elif ad_spec is not None and bool(ad_spec.observation.get("needs_lidar")):
-        if env.lidar is None:
-            print("[aether] WARN: adapter needs LiDAR but scenario.lidar.enabled is false")
-        else:
-            print("[aether] LiDAR in obs for AD adapter", flush=True)
+    env = difix = None
+    videos: dict[str, _VideoSink] = {}
+    try:
+        with perf.section("env_init"):
+            env = AetherDrivingEnv(cfg, output_dir)
+        if ad_spec is not None and ad_spec.needs_depth:
+            print("[aether] adapter requests depth/lidar — ensure scenario.lidar.enabled")
+        elif ad_spec is not None and bool(ad_spec.observation.get("needs_lidar")):
+            if env.lidar is None:
+                print("[aether] WARN: adapter needs LiDAR but scenario.lidar.enabled is false")
+            else:
+                print("[aether] LiDAR in obs for AD adapter", flush=True)
 
-    splatad = None
-    needs_lidar = bool(ad_spec and ad_spec.observation.get("needs_lidar"))
-    if needs_lidar and splatad_lidar:
-        from aether.tools.splatad_lidar_obs import maybe_create_provider
-        splatad = maybe_create_provider(
-            env, cfg, lidar_sidecar, lidar_bundle, _REPO, needs_lidar=True,
-            refine=lidar_refine,
-        )
-        if splatad is not None:
-            print("[aether] SplatAD+refiner LiDAR will replace depth-backproj", flush=True)
+        splatad = None
+        needs_lidar = bool(ad_spec and ad_spec.observation.get("needs_lidar"))
+        if needs_lidar and splatad_lidar:
+            from aether.tools.splatad_lidar_obs import maybe_create_provider
+            splatad = maybe_create_provider(
+                env, cfg, lidar_sidecar, lidar_bundle, _REPO, needs_lidar=True,
+                refine=lidar_refine,
+            )
+            if splatad is not None:
+                print("[aether] SplatAD+refiner LiDAR will replace depth-backproj", flush=True)
 
-    obs_pipe, plan_pipe = make_pipes(output_dir)
-    print(f"[aether] pipes ready in {output_dir}")
+        obs_pipe, plan_pipe = make_pipes(output_dir)
+        print(f"[aether] pipes ready in {output_dir}")
 
-    trace_dir = os.path.join(output_dir, "io_trace")
-    os.makedirs(trace_dir, exist_ok=True)
-    print(f"[aether] per-step IO trace -> {trace_dir}  (skip={skip_io_trace})")
+        trace_dir = os.path.join(output_dir, "io_trace")
+        os.makedirs(trace_dir, exist_ok=True)
+        print(f"[aether] per-step IO trace -> {trace_dir}  (skip={skip_io_trace})")
 
-    difix = None
-    if refine:
-        from aether.refine import DifixDaemon
-        difix_work = os.path.join(output_dir, "refine_work")
-        difix = DifixDaemon(
-            model_name=refine_model,
-            max_side=refine_max_side,
-            timestep=refine_timestep,
-            cuda_visible=refine_cuda,
-            work_root=difix_work,
-            dtype=refine_dtype,
-        )
-        difix.start()
-        print(f"[aether] in-loop Difix refinement enabled (cuda={refine_cuda},"
-              f" max_side={refine_max_side}, dtype={refine_dtype},"
-              f" model={refine_model})")
+        if refine:
+            from aether.refine import DifixDaemon
+            difix_work = os.path.join(output_dir, "refine_work")
+            difix = DifixDaemon(
+                model_name=refine_model,
+                max_side=refine_max_side,
+                timestep=refine_timestep,
+                cuda_visible=refine_cuda,
+                work_root=difix_work,
+                dtype=refine_dtype,
+            )
+            difix.start()
+            print(f"[aether] in-loop Difix refinement enabled (cuda={refine_cuda},"
+                  f" max_side={refine_max_side}, dtype={refine_dtype},"
+                  f" model={refine_model})")
 
-    obs_save, info_save, bev_save, traffic_save = [], [], [], []
-    refine_audit = []
-    refine_audit_path = os.path.join(output_dir, "refine_audit.json")
-    save = {"type": "closeloop", "frames": []}
-    step_timings = []  # per-step wall + breakdown for diffusion-overhead analysis
+        videos = {
+            "camera": _VideoSink(os.path.join(output_dir, "video.mp4")),
+            "composite": _VideoSink(os.path.join(output_dir, "limsim_aether.mp4")),
+            "bev": _VideoSink(os.path.join(output_dir, "bev.mp4")),
+        }
+        info_save = []
+        camera_inputs = 0
+        refine_audit = []
+        refine_audit_path = os.path.join(output_dir, "refine_audit.json")
+        save = {"type": "closeloop", "frames": []}
+        step_timings = []  # per-step wall + breakdown for diffusion-overhead analysis
 
-    with perf.section("env_reset"):
-        obs, info = env.reset()
-    done = False
-    cnt = 0
-    while not done:
-        t_step0 = time.perf_counter()
-        t_refine_ms = 0.0
+        with perf.section("env_reset"):
+            obs, info = env.reset()
+        done = False
+        cnt = 0
+        while not done:
+            t_step0 = time.perf_counter()
+            t_refine_ms = 0.0
+            if difix is not None:
+                try:
+                    obs, audit_entry, t_refine_ms = _refine_step(
+                        difix, obs, info, cnt, expected_cameras, difix_required, perf,
+                    )
+                except _MandatoryRefineError as error:
+                    refine_audit.append(error.audit_entry)
+                    _write_json(refine_audit_path, refine_audit)
+                    raise
+                refine_audit.append(audit_entry)
+                _write_json(refine_audit_path, refine_audit)
+            if splatad is not None:
+                if cnt == 0:
+                    print("[aether] first LiDAR-head render may JIT-compile CUDA kernels "
+                          "(several minutes); export TORCH_CUDA_ARCH_LIST=8.9 to speed up",
+                          flush=True)
+                with perf.section("splatad_lidar"):
+                    try:
+                        obs["lidar"] = splatad.enhance_obs_lidar()
+                    except Exception as e:
+                        print(f"[splatad-lidar] step {cnt}: {e}; keeping depth-backproj")
+            if env._external_vehicle_pool is not None:
+                env._external_vehicle_pool.assert_original_dynamic_hidden()
+            with perf.section("video_encode"):
+                videos["camera"].write(_camera_grid(obs["rgb"]))
+                traffic_frame = env.render_traffic_2d()
+                if traffic_frame is not None:
+                    videos["composite"].write(_composite_frame(obs["rgb"], traffic_frame))
+            camera_inputs += 1
+            info_save.append(info)
+
+            assert_adapter_alive(ad_proc, ad_log_path)
+            with perf.section("ipc_serialize"):
+                payload = pickle.dumps((obs, info), protocol=4)
+            with perf.section("ipc_write_obs"):
+                send_fifo(obs_pipe, payload, ad_proc, ad_log_path, step_timeout_s)
+            t_ad0 = time.perf_counter()
+            with perf.section("ad_roundtrip"):
+                raw = recv_fifo(plan_pipe, ad_proc, ad_log_path, step_timeout_s)
+            t_ad_ms = (time.perf_counter() - t_ad0) * 1000.0
+            with perf.section("ipc_deserialize"):
+                plan_traj = pickle.loads(raw) if raw else None
+
+            if plan_traj is None:
+                print("[aether] AD adapter returned None; ending.")
+                break
+
+            with perf.section("traj2control"):
+                acc, steer_rate = _traj_to_action(plan_traj, info)
+            if not skip_io_trace:
+                with perf.section("io_trace_dump"):
+                    try:
+                        _save_io_trace(trace_dir, cnt, info, obs, plan_traj, acc, steer_rate)
+                    except Exception as e:
+                        print(f"[io_trace] step {cnt}: {e}")
+            t_env0 = time.perf_counter()
+            with perf.section("env_step_render"):
+                obs, _, terminated, truncated, info = env.step(
+                    {"acc": acc, "steer_rate": steer_rate}
+                )
+            t_env_ms = (time.perf_counter() - t_env0) * 1000.0
+            cnt += 1
+            done = terminated or truncated
+
+            with perf.section("bev_render"):
+                try:
+                    videos["bev"].write(render_bev(info))
+                except Exception as e:
+                    print(f"[bev] step {cnt}: {e}")
+
+            t_step_ms = (time.perf_counter() - t_step0) * 1000.0
+            step_timings.append({
+                "step": cnt - 1,
+                "total_ms":   t_step_ms,
+                "refine_ms":  t_refine_ms,
+                "ad_ms":      t_ad_ms,
+                "env_ms":     t_env_ms,
+            })
+            print(f"[step {cnt-1:03d}] t={info['timestamp']:.2f}s "
+                  f"v={info['ego_velo']:.2f}m/s rc={info.get('rc', 0):.2f} "
+                  f"| step={t_step_ms:6.0f}ms (refine={t_refine_ms:5.0f} "
+                  f"ad={t_ad_ms:5.0f} env={t_env_ms:5.0f})")
+
+            save["frames"].append({
+                "time_stamp": info["timestamp"],
+                "is_key_frame": True,
+                "ego_pos":   info["ego_pos"],
+                "ego_rot":   info["ego_rot"],
+                "ego_velo":  info["ego_velo"],
+                "ego_steer": info["ego_steer"],
+                "ego_box":   info["ego_box"],
+                "obj_boxes": info["obj_boxes"],
+                "obj_names": ["car"] * len(info["obj_boxes"]),
+                "collision": info.get("collision", False),
+                "bg_collision": info.get("bg_collision", False),
+                "fg_collision": info.get("fg_collision", False),
+                "off_scene":    info.get("off_scene", False),
+                "off_road":     info.get("off_road"),
+                "rc":        info.get("rc", 0.0),
+                "planned_traj": {
+                    "traj": plan_traj.tolist() if hasattr(plan_traj, "tolist") else plan_traj,
+                    "timestep": plan_dt,
+                },
+            })
+
         if difix is not None:
-            t_r0 = time.perf_counter()
-            raw_rgb = {name: np.asarray(value) for name, value in obs["rgb"].items()}
-            audit_entry = {
-                "step": cnt,
-                "timestamp": float(info["timestamp"]),
-                "status": "failed",
-                "cameras": {},
-            }
-            with perf.section("difix_refine"):
-                try:
-                    if len(raw_rgb) != expected_cameras:
-                        raise RuntimeError(
-                            f"expected {expected_cameras} camera inputs, got {len(raw_rgb)}"
-                        )
-                    refined = difix.refine_obs_rgb(raw_rgb)
-                    if set(refined) != set(raw_rgb):
-                        raise RuntimeError(
-                            f"Difix camera set changed: input={sorted(raw_rgb)}, "
-                            f"output={sorted(refined)}"
-                        )
-                    checked = {}
-                    for camera in sorted(raw_rgb):
-                        input_image = raw_rgb[camera]
-                        output_image = np.asarray(refined[camera])
-                        if output_image.shape != input_image.shape:
-                            raise RuntimeError(
-                                f"Difix shape mismatch for {camera}: "
-                                f"{input_image.shape} -> {output_image.shape}"
-                            )
-                        if output_image.dtype != np.uint8:
-                            raise RuntimeError(
-                                f"Difix output for {camera} must be uint8, "
-                                f"got {output_image.dtype}"
-                            )
-                        checked[camera] = output_image
-                        audit_entry["cameras"][camera] = {
-                            "shape": list(output_image.shape),
-                            "input_sha256": _rgb_digest(input_image),
-                            "output_sha256": _rgb_digest(output_image),
-                        }
-                    obs["rgb"] = checked
-                    audit_entry["status"] = "success"
-                except Exception as e:
-                    audit_entry["error"] = str(e)
-                    if difix_required:
-                        refine_audit.append(audit_entry)
-                        _write_json(refine_audit_path, refine_audit)
-                        try:
-                            difix.stop()
-                        finally:
-                            env.close()
-                        raise RuntimeError(
-                            f"mandatory Difix failed at step {cnt}; raw images "
-                            "were not sent to the AD adapter"
-                        ) from e
-                    print(f"[difix] step {cnt}: refine failed ({e}); using raw")
-            t_refine_ms = (time.perf_counter() - t_r0) * 1000.0
-            audit_entry["duration_ms"] = t_refine_ms
-            refine_audit.append(audit_entry)
-            _write_json(refine_audit_path, refine_audit)
-        if splatad is not None:
-            if cnt == 0:
-                print("[aether] first LiDAR-head render may JIT-compile CUDA kernels "
-                      "(several minutes); export TORCH_CUDA_ARCH_LIST=8.9 to speed up",
-                      flush=True)
-            with perf.section("splatad_lidar"):
-                try:
-                    obs["lidar"] = splatad.enhance_obs_lidar()
-                except Exception as e:
-                    print(f"[splatad-lidar] step {cnt}: {e}; keeping depth-backproj")
-        if env._external_vehicle_pool is not None:
-            env._external_vehicle_pool.assert_original_dynamic_hidden()
-        traffic_frame = env.render_traffic_2d()
-        if traffic_frame is not None:
-            traffic_save.append(traffic_frame)
-        obs_save.append(obs["rgb"])
-        info_save.append(info)
-
-        assert_adapter_alive(ad_proc, ad_log_path)
-        with perf.section("ipc_serialize"):
-            payload = pickle.dumps((obs, info), protocol=4)
-        with perf.section("ipc_write_obs"):
-            with open(obs_pipe, "wb") as p:
-                p.write(payload)
-        t_ad0 = time.perf_counter()
-        with perf.section("ad_roundtrip"):
-            with open(plan_pipe, "rb") as p:
-                raw = p.read()
-        t_ad_ms = (time.perf_counter() - t_ad0) * 1000.0
-        with perf.section("ipc_deserialize"):
-            plan_traj = pickle.loads(raw)
-
-        if plan_traj is None:
-            print("[aether] AD adapter returned None; ending.")
-            break
-
-        with perf.section("traj2control"):
-            acc, steer_rate = _traj_to_action(plan_traj, info)
-        if not skip_io_trace:
-            with perf.section("io_trace_dump"):
-                try:
-                    _save_io_trace(trace_dir, cnt, info, obs, plan_traj, acc, steer_rate)
-                except Exception as e:
-                    print(f"[io_trace] step {cnt}: {e}")
-        t_env0 = time.perf_counter()
-        with perf.section("env_step_render"):
-            obs, _, terminated, truncated, info = env.step(
-                {"acc": acc, "steer_rate": steer_rate}
-            )
-        t_env_ms = (time.perf_counter() - t_env0) * 1000.0
-        cnt += 1
-        done = terminated or truncated
-
-        with perf.section("bev_render"):
             try:
-                bev_save.append(render_bev(info))
+                difix.stop()
             except Exception as e:
-                print(f"[bev] step {cnt}: {e}")
+                print(f"[difix] stop failed: {e}")
+            difix = None
 
-        t_step_ms = (time.perf_counter() - t_step0) * 1000.0
-        step_timings.append({
-            "step": cnt - 1,
-            "total_ms":   t_step_ms,
-            "refine_ms":  t_refine_ms,
-            "ad_ms":      t_ad_ms,
-            "env_ms":     t_env_ms,
-        })
-        print(f"[step {cnt-1:03d}] t={info['timestamp']:.2f}s "
-              f"v={info['ego_velo']:.2f}m/s rc={info.get('rc', 0):.2f} "
-              f"| step={t_step_ms:6.0f}ms (refine={t_refine_ms:5.0f} "
-              f"ad={t_ad_ms:5.0f} env={t_env_ms:5.0f})")
-
-        save["frames"].append({
-            "time_stamp": info["timestamp"],
-            "is_key_frame": True,
-            "ego_pos":   info["ego_pos"],
-            "ego_rot":   info["ego_rot"],
-            "ego_velo":  info["ego_velo"],
-            "ego_steer": info["ego_steer"],
-            "ego_box":   info["ego_box"],
-            "obj_boxes": info["obj_boxes"],
-            "obj_names": ["car"] * len(info["obj_boxes"]),
-            "collision": info.get("collision", False),
-            "bg_collision": info.get("bg_collision", False),
-            "fg_collision": info.get("fg_collision", False),
-            "off_scene":    info.get("off_scene", False),
-            "off_road":     info.get("off_road"),
-            "rc":        info.get("rc", 0.0),
-            "planned_traj": {
-                "traj": plan_traj.tolist() if hasattr(plan_traj, "tolist") else plan_traj,
-                "timestep": 0.25,
-            },
-        })
-
-    if difix is not None:
-        try:
-            difix.stop()
-        except Exception as e:
-            print(f"[difix] stop failed: {e}")
-
-    if difix_required:
-        failures = [entry for entry in refine_audit if entry.get("status") != "success"]
-        if failures or len(refine_audit) != len(obs_save):
-            env.close()
-            raise RuntimeError(
-                f"Difix audit incomplete: success={len(refine_audit) - len(failures)}, "
-                f"camera_inputs={len(obs_save)}, failures={len(failures)}"
-            )
-    _write_json(refine_audit_path, refine_audit)
-    _write_json(
-        os.path.join(output_dir, "dynamic_removal_audit.json"),
-        {
-            "status": "success",
-            "hidden_original_instances": dict(env._dynamic_removal_audit),
-            "external_asset_slots": len(
-                env._external_vehicle_pool.instance_ids
-                if env._external_vehicle_pool is not None else ()
-            ),
-        },
-    )
-
-    # Notify adapter we're done.
-    with open(obs_pipe, "wb") as p:
-        p.write(pickle.dumps("Done", protocol=4))
-
-    with open(os.path.join(output_dir, "data.pkl"), "wb") as f:
-        pickle.dump([save], f)
-    with open(os.path.join(output_dir, "infos.pkl"), "wb") as f:
-        pickle.dump(info_save, f)
-    with perf.section("video_encode"):
-        _to_video(obs_save, os.path.join(output_dir, "video.mp4"))
-        if traffic_save:
-            _to_composite_video(
-                obs_save, traffic_save,
-                os.path.join(output_dir, "limsim_aether.mp4"),
-            )
-        if bev_save:
-            ImageSequenceClip(bev_save, fps=4).write_videofile(
-                os.path.join(output_dir, "bev.mp4"), logger=None
-            )
-
-    wall = time.perf_counter() - t_wall0
-    perf.print_table(wall)
-    perf_path = os.path.join(output_dir, "perf.json")
-    with open(perf_path, "w") as f:
-        json.dump({
-            "scenario": getattr(cfg.scenario, "scene_name", "?"),
-            "wall_s":   wall,
-            "frames":   cnt,
-            "obs_cameras_only": bool(getattr(env, "obs_cameras_only", True)),
-            "skip_io_trace":    bool(skip_io_trace),
-            "difix": {
-                "required": difix_required,
-                "expected_cameras": expected_cameras,
-                "audited_inputs": len(refine_audit),
-                "successful_inputs": sum(
-                    entry.get("status") == "success" for entry in refine_audit
+        if difix_required:
+            failures = [entry for entry in refine_audit if entry.get("status") != "success"]
+            if failures or len(refine_audit) != camera_inputs:
+                raise RuntimeError(
+                    f"Difix audit incomplete: success={len(refine_audit) - len(failures)}, "
+                    f"camera_inputs={camera_inputs}, failures={len(failures)}"
+                )
+        _write_json(refine_audit_path, refine_audit)
+        _write_json(
+            os.path.join(output_dir, "dynamic_removal_audit.json"),
+            {
+                "status": "success",
+                "hidden_original_instances": dict(env._dynamic_removal_audit),
+                "external_asset_slots": len(
+                    env._external_vehicle_pool.instance_ids
+                    if env._external_vehicle_pool is not None else ()
                 ),
             },
-            "dynamic_removal_audit": dict(env._dynamic_removal_audit),
-            "composite_frames": len(traffic_save),
-            "segments": perf.summary(),
-            "step_timings_ms": step_timings,
-        }, f, indent=2)
-    print(f"[perf] wrote {perf_path}")
-    if step_timings:
-        import statistics as _st
-        tot = [s["total_ms"] for s in step_timings]
-        ref = [s["refine_ms"] for s in step_timings]
-        ad  = [s["ad_ms"] for s in step_timings]
-        env_ = [s["env_ms"] for s in step_timings]
-        def _q(xs, q):
-            xs = sorted(xs); k = int(round((len(xs)-1)*q)); return xs[k]
-        print(f"[perf] per-step ms  total mean={_st.mean(tot):.0f} p50={_q(tot,.5):.0f} p90={_q(tot,.9):.0f} max={max(tot):.0f}")
-        print(f"               refine mean={_st.mean(ref):.0f} p50={_q(ref,.5):.0f} p90={_q(ref,.9):.0f}")
-        print(f"               ad     mean={_st.mean(ad):.0f}  p50={_q(ad,.5):.0f}  p90={_q(ad,.9):.0f}")
-        print(f"               env    mean={_st.mean(env_):.0f} p50={_q(env_,.5):.0f} p90={_q(env_,.9):.0f}")
-    env.close()
-    print(f"[aether] artifacts written to {output_dir}")
+        )
+
+        # Notify adapter we're done (best effort: it may already have exited).
+        try:
+            send_fifo(obs_pipe, pickle.dumps("Done", protocol=4),
+                      ad_proc, ad_log_path, timeout_s=30.0)
+        except (RuntimeError, TimeoutError) as e:
+            print(f"[aether] adapter did not take the Done message: {str(e).splitlines()[0]}")
+
+        with open(os.path.join(output_dir, "data.pkl"), "wb") as f:
+            pickle.dump([save], f)
+        with open(os.path.join(output_dir, "infos.pkl"), "wb") as f:
+            pickle.dump(info_save, f)
+        composite_frames = videos["composite"].frames
+        with perf.section("video_encode"):
+            for sink in videos.values():
+                sink.close()
+
+        wall = time.perf_counter() - t_wall0
+        perf.print_table(wall)
+        perf_path = os.path.join(output_dir, "perf.json")
+        with open(perf_path, "w") as f:
+            json.dump({
+                "scenario": getattr(cfg.scenario, "scene_name", "?"),
+                "wall_s":   wall,
+                "frames":   cnt,
+                "obs_cameras_only": bool(getattr(env, "obs_cameras_only", True)),
+                "skip_io_trace":    bool(skip_io_trace),
+                "legacy_compat":    bool(getattr(env, "legacy_compat", False)),
+                "difix": {
+                    "required": difix_required,
+                    "expected_cameras": expected_cameras,
+                    "audited_inputs": len(refine_audit),
+                    "successful_inputs": sum(
+                        entry.get("status") == "success" for entry in refine_audit
+                    ),
+                },
+                "dynamic_removal_audit": dict(env._dynamic_removal_audit),
+                "composite_frames": composite_frames,
+                "segments": perf.summary(),
+                "step_timings_ms": step_timings,
+            }, f, indent=2)
+        print(f"[perf] wrote {perf_path}")
+        if step_timings:
+            import statistics as _st
+            tot = [s["total_ms"] for s in step_timings]
+            ref = [s["refine_ms"] for s in step_timings]
+            ad  = [s["ad_ms"] for s in step_timings]
+            env_ = [s["env_ms"] for s in step_timings]
+            def _q(xs, q):
+                xs = sorted(xs); k = int(round((len(xs)-1)*q)); return xs[k]
+            print(f"[perf] per-step ms  total mean={_st.mean(tot):.0f} p50={_q(tot,.5):.0f} p90={_q(tot,.9):.0f} max={max(tot):.0f}")
+            print(f"               refine mean={_st.mean(ref):.0f} p50={_q(ref,.5):.0f} p90={_q(ref,.9):.0f}")
+            print(f"               ad     mean={_st.mean(ad):.0f}  p50={_q(ad,.5):.0f}  p90={_q(ad,.9):.0f}")
+            print(f"               env    mean={_st.mean(env_):.0f} p50={_q(env_,.5):.0f} p90={_q(env_,.9):.0f}")
+        print(f"[aether] artifacts written to {output_dir}")
+    finally:
+        # Release the Difix GPU process, video encoders and the traffic
+        # sidecar connection on every exit path, including adapter failures.
+        for sink in videos.values():
+            try:
+                sink.close()
+            except Exception as e:
+                print(f"[video] close failed: {e}")
+        if difix is not None:
+            try:
+                difix.stop()
+            except Exception as e:
+                print(f"[difix] stop failed: {e}")
+        if env is not None:
+            env.close()
 
 
 if __name__ == "__main__":
@@ -664,47 +726,32 @@ if __name__ == "__main__":
     # then immediately open(obs_pipe) race and FileNotFoundError if pipes come later.
     make_pipes(os.path.abspath(out))
 
-    spec = None
-    # Prefer declarative adapter spec; fall back to legacy `cfg.base.{ad}_path`.
-    try:
-        if args.ad_config:
-            import yaml as _y
-            with open(args.ad_config) as _f:
-                _data = _y.safe_load(_f) or {}
-            from aether.agents.registry import AdapterSpec
-            _launcher = dict(_data.get("launcher") or {})
-            for _key in ("entrypoint", "cwd"):
-                if not _launcher.get(_key):
-                    continue
-                _value = os.path.expandvars(os.path.expanduser(str(_launcher[_key])))
-                if not os.path.isabs(_value):
-                    _value = os.path.join(_REPO, _value)
-                _launcher[_key] = os.path.abspath(_value)
-            spec = AdapterSpec(name=_data.get("name", args.ad),
-                               display_name=_data.get("display_name", args.ad),
-                               launcher=_launcher,
-                               ipc=_data.get("ipc") or {},
-                               observation=_data.get("observation") or {},
-                               output=_data.get("output") or {},
-                               capabilities=_data.get("capabilities") or {},
-                               source_path=args.ad_config)
-        else:
+    # Declarative adapter spec (configs/adapters/<ad>.yaml or --ad_config);
+    # the legacy ``cfg.base.<ad>_path`` shell launcher is the fallback.
+    from aether.agents.registry import load_adapter_file
+    ad_log = os.path.join(os.path.abspath(out), "ad_output.txt")
+    if args.ad_config:
+        spec = load_adapter_file(args.ad_config, args.ad, repo_root=_REPO)
+    else:
+        try:
             spec = load_adapter(args.ad, legacy_cfg=cfg.base)
+        except FileNotFoundError:
+            spec = None
+    if spec is not None:
         proc = launch_adapter(spec, args.ad_cuda, os.path.abspath(out))
-        ad_log = os.path.join(os.path.abspath(out), "ad_output.txt")
+    else:
+        proc = launch(_ad_path(cfg, args.ad), args.ad_cuda, os.path.abspath(out))
+    try:
         wait_adapter_ready(
             proc, ad_log,
             timeout_s=float(os.environ.get("AETHER_AD_READY_TIMEOUT", "1800")),
         )
+    except Exception:
+        proc.kill()
+        raise
+    if spec is not None:
         print(f"[aether] adapter '{args.ad}' cameras={spec.cameras or 'all'} "
               f"needs_lidar={spec.observation.get('needs_lidar', False)}", flush=True)
-    except FileNotFoundError:
-        proc = launch(_ad_path(cfg, args.ad), args.ad_cuda, os.path.abspath(out))
-        ad_log = os.path.join(os.path.abspath(out), "ad_output.txt")
-        wait_adapter_ready(
-            proc, ad_log,
-            timeout_s=float(os.environ.get("AETHER_AD_READY_TIMEOUT", "1800")),
-        )
     try:
         run(cfg, out,
             skip_io_trace=args.no_io_trace,

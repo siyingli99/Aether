@@ -1,5 +1,21 @@
+import os
+
 from aether.control.ilqr.lqr_solver import ILQRSolverParameters, ILQRWarmStartParameters, ILQRSolver
 import numpy as np
+
+
+def _max_solve_time():
+    """Wall-clock cap for one iLQR solve.
+
+    The nuPlan default (0.05 s) makes the number of iterations, and therefore
+    the control command, depend on CPU load: the same closed-loop episode can
+    diverge between runs.  AETHER is not real-time, so the default is no cap
+    (the solve still stops at convergence or ``max_ilqr_iterations``).  Set
+    ``AETHER_ILQR_MAX_SOLVE_TIME=0.05`` to reproduce older runs.
+    """
+    value = os.environ.get("AETHER_ILQR_MAX_SOLVE_TIME", "").strip()
+    return float(value) if value else None
+
 
 solver_params = ILQRSolverParameters(
     discretization_time=0.5,
@@ -9,7 +25,7 @@ solver_params = ILQRSolverParameters(
     input_trust_region_entries=[1.0] * 2,
     max_ilqr_iterations=100,
     convergence_threshold=1e-6,
-    max_solve_time=0.05,
+    max_solve_time=_max_solve_time(),
     max_acceleration=3.0,
     max_steering_angle=np.pi / 3.0,
     max_steering_angle_rate=0.4,
