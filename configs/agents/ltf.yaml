@@ -1,0 +1,13 @@
+name: ltf
+title: LTF (NAVSIM Latent TransFuser)
+description: >-
+  NAVSIM LTF agent.  Plans 8 poses at 0.5 s in the rear-axle frame (nuPlan
+  convention); the adapter reports them as (right, forward).
+command: [bash, "${AETHER_EXTERNAL}/NAVSIM/ltf_e2e.sh", "${cuda}", "${workdir}"]
+env: {PYTHONUNBUFFERED: "1"}
+ready: ["ready for"]
+protocol: tuple
+input:
+  cameras: [CAM_FRONT, CAM_FRONT_RIGHT, CAM_FRONT_LEFT]
+  lidar: true
+output: {dt: 0.5, frame: rear_axle, axes: rfu}

@@ -1,0 +1,8 @@
+# Closed-loop benchmark on the two demo scenes.
+#   python -m aether bench configs/benchmarks/nuscenes-demo.yaml --agents uniad,vad
+name: nuscenes-demo
+scenarios:
+  - configs/scenarios/nuscenes-0383.yaml
+  - configs/scenarios/nuscenes-0106.yaml
+agents: [replay, uniad, vad, ltf, vla]
+seeds: [0]

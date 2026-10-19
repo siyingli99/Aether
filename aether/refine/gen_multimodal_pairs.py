@@ -8,6 +8,9 @@ Example:
 """
 from __future__ import annotations
 
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
+
 import argparse
 import json
 import os

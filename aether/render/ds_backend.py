@@ -29,10 +29,9 @@ Key design points
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import torch
@@ -55,8 +54,9 @@ class DriveStudioRenderer:
     def __init__(self, ckpt_path: str | Path, device: str = "cuda",
                  excluded_model_classes: tuple[str, ...] = ()):
         import os
+        from aether.paths import DRIVESTUDIO_ROOT, use_vendored_backends
+        use_vendored_backends()
         from utils.misc import import_str  # drivestudio util
-        from aether.paths import DRIVESTUDIO_ROOT
 
         # drivestudio's SMPL/sky/AABB loaders use paths relative to the
         # drivestudio repo root (e.g. "smpl_models/SMPL_NEUTRAL.pkl"),
@@ -131,7 +131,12 @@ class DriveStudioRenderer:
                           excluded_model_classes: tuple[str, ...] = ()) -> Dict[str, Any]:
         """Pull num_timesteps / num_*_images / scene_aabb out of the
         checkpoint's stored module states without touching raw data on disk."""
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # Memory-mapped: only the few tensors read below are paged in, so the
+        # checkpoint is not fully loaded twice (the trainer loads it next).
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False, mmap=True)
+        except (RuntimeError, TypeError):
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         models = ckpt["models"]
         excluded_dynamic_counts: dict[str, int] = {}
         for class_name in excluded_model_classes:
@@ -190,6 +195,15 @@ class DriveStudioRenderer:
     @property
     def num_frames(self) -> int:
         return self._frame_count
+
+    @torch.no_grad()
+    def background_points(self, min_opacity: float = 0.3) -> np.ndarray:
+        """(N, 3) scene-frame centres of opaque background Gaussians."""
+        background = self.trainer.models.get("Background")
+        if background is None:
+            return np.zeros((0, 3), dtype=np.float32)
+        opacity = background.get_opacity.squeeze(-1)
+        return background._means[opacity > min_opacity].detach().cpu().numpy().astype(np.float64)
 
     # ------------------------------------------------------------------ #
     # Actor-pose injection
@@ -362,6 +376,8 @@ class DriveStudioRenderer:
 
         Returns a dict with at least ``rgb`` (H, W, 3) float in [0, 1] and
         ``depth`` (H, W, 1).  Stored on `self.device` (typically cuda).
+        ``cam_idx`` is the camera's index inside the reconstruction (it picks
+        the per-image appearance embedding).
         """
         return self._render_core(
             c2w_4x4, K_3x3, H, W, frame_idx, cam_idx,

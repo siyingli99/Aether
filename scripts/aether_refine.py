@@ -1,17 +1,15 @@
 """Function: Refine rendered closed-loop camera frames with Difix3D.
 Input/Output: Reads an adapter frame directory and optional references; writes refined frames, metrics, and an optional video.
 Example:
-    # Prerequisite: run a closed-loop rollout to create the input frame directory.
-    python scripts/aether_refine.py aether_results/pandaset/pandaset_095_aether/uniad/easy \
+    # Prerequisite: a closed-loop run with output.io_trace=true (frames in logs/io/).
+    python scripts/aether_refine.py outputs/runs/<run>/logs/io \
         --output_dir outputs/pandaset095_refined --max_side 1024 --video
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-from glob import glob
 from pathlib import Path
 
 import numpy as np

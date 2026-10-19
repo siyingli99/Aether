@@ -1,0 +1,10 @@
+# PandaSet data-collection vehicle (Chrysler Pacifica).
+name: chrysler_pacifica
+length: 5.176
+width: 2.022
+height: 1.777
+wheelbase: 3.089
+rear_overhang: 1.087
+max_steer_deg: 35
+max_accel: 3.0
+max_decel: 8.0

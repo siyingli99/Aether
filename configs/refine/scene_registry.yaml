@@ -4,7 +4,7 @@
 
 scenes:
   - id: pandaset095_joint
-    joint_dir: outputs/dualmodal/aether_joint/pandaset/scene095_joint
+    joint_dir: outputs/train/pandaset-095/joint
     dataset: pandaset
     data_root: data/pandaset/processed
     scene_idx: 95

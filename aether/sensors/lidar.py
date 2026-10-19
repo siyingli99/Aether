@@ -12,7 +12,7 @@ and ``intensity = NaN`` because we have no reflectance signal yet.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Sequence, Tuple, Optional
+from typing import Dict, Tuple
 
 import numpy as np
 

@@ -54,7 +54,8 @@ def repo_id(value: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", choices=["0383", "088", "all"], default="all")
+    # "088" is the archive of nuScenes trainval index 88 = scene-0106.
+    parser.add_argument("--scene", choices=["0383", "0106", "088", "all"], default="all")
     parser.add_argument("--no-assets", action="store_true")
     parser.add_argument(
         "--repo", "--repo-id", dest="repo", default=REPO_URL,
@@ -69,7 +70,7 @@ def main() -> None:
         dataset_id, "manifest.json", repo_type="dataset"
     ))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    selected = ["0383", "088"] if args.scene == "all" else [args.scene]
+    selected = ["0383", "088"] if args.scene == "all" else [{"0106": "088"}.get(args.scene, args.scene)]
     if not args.no_assets:
         selected.append("assets")
 
@@ -87,7 +88,12 @@ def main() -> None:
     data_dir = output / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(manifest_path, data_dir / "demo_manifest.json")
-    print("[aether-data] ready")
+    # Convert the archive layout into scene bundles (data/scenes/<id>).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from aether.scene.importer import migrate_legacy_demo
+    for bundle in migrate_legacy_demo(output, output / "data" / "scenes"):
+        print(f"[aether-data] scene bundle {bundle}")
+    print("[aether-data] ready – try: python -m aether scenes")
 
 
 if __name__ == "__main__":

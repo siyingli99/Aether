@@ -1,0 +1,5 @@
+# Same scene with AETHER's built-in IDM traffic on the HD-map lanes
+# (no external traffic simulator needed).
+extends: nuscenes-0383.yaml
+traffic:
+  model: {type: idm, count: 3, desired_speed: 8.0}

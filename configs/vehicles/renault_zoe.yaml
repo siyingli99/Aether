@@ -1,0 +1,10 @@
+# nuScenes data-collection vehicle (Renault Zoe).
+name: renault_zoe
+length: 4.084
+width: 1.730
+height: 1.562
+wheelbase: 2.588
+rear_overhang: 0.657
+max_steer_deg: 35
+max_accel: 3.0
+max_decel: 8.0

@@ -1,0 +1,10 @@
+# Generic mid-size sedan (default when a dataset vehicle is unknown).
+name: sedan
+length: 4.6
+width: 1.85
+height: 1.5
+wheelbase: 2.8
+rear_overhang: 0.95
+max_steer_deg: 35
+max_accel: 3.0
+max_decel: 8.0

@@ -1,4 +1,23 @@
-"""FIFO bridge used by external end-to-end planners."""
+"""Planner-side FIFO bridge (runs inside the planner's own environment).
+
+This module depends only on NumPy and the standard library: copy it into
+any project, or put the AETHER checkout on ``PYTHONPATH``.
+
+    from aether.agents.sdk import AdapterAgent, serve
+
+    class MyPlanner(AdapterAgent):
+        def setup(self):            # load weights once
+            ...
+        def infer(self, obs, info):
+            # tuple protocol: obs["rgb"][cam] (H, W, 3) uint8, info as documented
+            # observation protocol: obs is the Observation dict, info is None
+            return waypoints          # (N, 2) as declared in the adapter YAML
+            # or {"waypoints": ..., "dt": 0.5, "frame": "rear_axle", "axes": "flu"}
+            # or {"accel": a, "steer_rate": r}
+
+    if __name__ == "__main__":
+        serve(MyPlanner())          # argv: <cuda_id> <workdir>
+"""
 from __future__ import annotations
 import os
 import pickle
@@ -11,7 +30,7 @@ from typing import Any, Dict
 import numpy as np
 
 
-class BaseAgent(ABC):
+class AdapterAgent(ABC):
     def __init__(self) -> None:
         self.cuda_id: str = "0"
         self.output_dir: str = ""
@@ -42,9 +61,13 @@ def _open_fifo_write(path: str, retries: int = 600):
     raise FileNotFoundError(f"plan pipe never appeared: {path}")
 
 
-def _trajectory(value: Any) -> np.ndarray:
-    """Normalize an adapter result to AETHER's ``(right, forward)`` path."""
+def _trajectory(value: Any):
+    """Validate an adapter result (waypoints array, plan dict or control dict)."""
     if isinstance(value, dict):
+        if "accel" in value:
+            return {"accel": float(value["accel"]), "steer_rate": float(value["steer_rate"])}
+        if "waypoints" in value:
+            return {**value, "waypoints": _trajectory(value["waypoints"])}
         value = value.get("plan_traj")
     plan = np.asarray(value, dtype=np.float32)
     if plan.ndim != 2 or plan.shape[0] < 1 or plan.shape[1] < 2:
@@ -55,7 +78,7 @@ def _trajectory(value: Any) -> np.ndarray:
     return plan
 
 
-def serve(agent: BaseAgent,
+def serve(agent: AdapterAgent,
           cuda_id: str | None = None,
           output_dir: str | None = None,
           obs_name: str = "obs_pipe",
@@ -86,9 +109,12 @@ def serve(agent: BaseAgent,
                 print("[aether-adapter] received Done — exiting", flush=True)
                 break
             try:
-                if not isinstance(payload, tuple) or len(payload) != 2:
-                    raise ValueError("expected the (obs, info) payload from AETHER")
-                obs, info = payload
+                if isinstance(payload, dict) and payload.get("type") == "step":
+                    obs, info = payload["observation"], None
+                elif isinstance(payload, tuple) and len(payload) == 2:
+                    obs, info = payload
+                else:
+                    raise ValueError("unexpected payload from AETHER")
                 plan = _trajectory(agent.infer(obs, info))
             except Exception:
                 traceback.print_exc()
@@ -97,3 +123,6 @@ def serve(agent: BaseAgent,
                 pickle.dump(plan, plan_f, protocol=pickle_protocol)
     finally:
         agent.teardown()
+
+
+BaseAgent = AdapterAgent       # old name

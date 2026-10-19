@@ -6,7 +6,7 @@ notice: >
 
 assets:
   - name: pandaset095_rgb_checkpoint
-    path: data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth
+    path: data/scenes/pandaset-095/recon/checkpoint.pth
     size_bytes: 575824329
     sha256: 6a05b6212129240dc350f391130a2f562a6ed59380549e5bdb4ec3bde1a558f6
     required: true
@@ -14,11 +14,11 @@ assets:
     redistributable: review_required
 
   - name: pandaset095_rgb_config
-    path: data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/config.yaml
+    path: data/scenes/pandaset-095/recon/config.yaml
     approximate_size: small
     sha256: a50d63a8521237cbd2560ba025af5273a00171cfb30fec5b0b976b1a2653c8bb
     required: true
-    purpose: Configuration paired with checkpoint_final.pth
+    purpose: Configuration paired with checkpoint.pth
     redistributable: review_required
 
   - name: pandaset095_ego_poses

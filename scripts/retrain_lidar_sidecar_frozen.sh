@@ -7,7 +7,7 @@
 #   bash scripts/retrain_lidar_sidecar_frozen.sh nusc 88
 #   bash scripts/retrain_lidar_sidecar_frozen.sh nusc 383
 #
-# Writes: outputs/dualmodal/aether_joint/<ds>/scene*_joint/lidar_sidecar_frozen.pt
+# Writes: outputs/train/<dataset>-<scene>/joint/lidar_sidecar_frozen.pt
 # Does NOT overwrite the original RGB checkpoint_final.pth used for rendering.
 set -euo pipefail
 
@@ -16,7 +16,7 @@ AETHER="${AETHER_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 cd "$AETHER"
 export PYTHONPATH="${AETHER}${PYTHONPATH:+:${PYTHONPATH}}"
 DS_ROOT="${AETHER}/third_party/drivestudio"
-OUT_ROOT="outputs/dualmodal/aether_joint"
+OUT_ROOT="outputs/train"
 PANDA_DATA="data/pandaset/processed"
 NUSC_DATA="data/nuscenes/processed_10Hz/trainval"
 NUM_ITERS="${NUM_ITERS:-10000}"
@@ -34,26 +34,21 @@ SCENE_IDX=$((10#$SCENE_RAW))
 
 if [[ "$DATASET" == "pandaset" ]]; then
   SID=$(printf "%03d" "$SCENE_IDX")
-  PROJECT=pandaset
-  RUN_NAME="scene${SID}_joint"
-  RGB=$(ls -1 data/checkpoints/pandaset_outputs/scene_recon_full/scene_${SID}_*/checkpoint_final.pth 2>/dev/null | head -1 || true)
+  PROJECT="pandaset-${SID}"
+  RUN_NAME=joint
+  RGB=$(ls -1 data/scenes/pandaset-${SID}/recon/checkpoint*.pth outputs/train/pandaset-${SID}/recon/checkpoint_final.pth 2>/dev/null | head -1 || true)
   EXTRA=(
     dataset=pandaset/6cams
     "data.data_root=${PANDA_DATA}"
     "data.scene_idx=${SCENE_IDX}"
   )
 else
-  PROJECT=nuscenes
-  if [[ "$SCENE_IDX" -eq 383 ]]; then
-    RUN_NAME="scene0383_joint"
-    RGB="data/checkpoints/nuscenes_outputs/scene_recon_full/scene_300_6cams_with_humans/checkpoint_final.pth"
-    PROC_IDX=300
-  else
-    SID=$(printf "%03d" "$SCENE_IDX")
-    RUN_NAME="scene${SID}_joint"
-    RGB=$(ls -1 data/checkpoints/nuscenes_outputs/scene_recon_full/scene_${SCENE_IDX}_*/checkpoint_final.pth 2>/dev/null | head -1 || true)
-    PROC_IDX=$SCENE_IDX
-  fi
+  RUN_NAME=joint
+  SID=$(printf "%04d" "$SCENE_IDX")
+  PROJECT="nuscenes-${SID}"
+  RGB=$(ls -1 data/scenes/nuscenes-${SID}/recon/checkpoint*.pth 2>/dev/null | head -1 || true)
+  # DriveStudio processed index of the scene (scene-0383 is index 300).
+  PROC_IDX="${PROC_IDX:-$([[ "$SCENE_IDX" -eq 383 ]] && echo 300 || echo "$SCENE_IDX")}"
   EXTRA=(
     "dataset=nuscenes/6cams"
     "data.data_root=${NUSC_DATA}"
@@ -83,4 +78,3 @@ python aether/train/joint_phase.py \
   "${EXTRA[@]}"
 
 echo "[frozen-lidar] DONE -> ${OUT_ROOT}/${PROJECT}/${RUN_NAME}/lidar_sidecar_frozen.pt"
-echo "[frozen-lidar] refresh GF yamls: python scripts/gen_gaussianfusion_scenarios.py"

@@ -16,11 +16,18 @@ export PYTHONPATH="${UNIAD_PATH}:${UNIAD_PATH}/tools/closeloop"
 
 CONFIG_PATH="${UNIAD_CONFIG:-${UNIAD_PATH}/projects/configs/stage2_e2e/base_e2e.py}"
 CHECKPOINT_PATH="${UNIAD_CHECKPOINT:-${AETHER_ROOT}/checkpoints/uniad_base_e2e.pth}"
-UNIAD_PYTHON="${UNIAD_PYTHON:-${AETHER_ROOT}/.conda/uniad/bin/python}"
+if [ -z "${UNIAD_PYTHON:-}" ]; then
+  # .conda/uniad inside the repo, else a conda env named "uniad".
+  for candidate in "${AETHER_ROOT}/.conda/uniad/bin/python" \
+                   "${CONDA_EXE:+$(dirname "$(dirname "${CONDA_EXE}")")/envs/uniad/bin/python}" \
+                   "${HOME}/miniconda3/envs/uniad/bin/python" "${HOME}/anaconda3/envs/uniad/bin/python"; do
+    if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then UNIAD_PYTHON="${candidate}"; break; fi
+  done
+fi
 
-if [ ! -x "${UNIAD_PYTHON}" ]; then
-  echo "UniAD Python not found: ${UNIAD_PYTHON}" >&2
-  echo "Create .conda/uniad as shown in README.md, or set UNIAD_PYTHON." >&2
+if [ ! -x "${UNIAD_PYTHON:-}" ]; then
+  echo "UniAD Python not found (${UNIAD_PYTHON:-no .conda/uniad and no conda env 'uniad'})" >&2
+  echo "Create .conda/uniad or a conda env 'uniad' as shown in README.md, or set UNIAD_PYTHON." >&2
   exit 1
 fi
 if [ ! -f "${CHECKPOINT_PATH}" ]; then

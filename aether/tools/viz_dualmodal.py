@@ -3,14 +3,13 @@ Input/Output: Reads a lidar_phase checkpoint and processed scene; writes one fou
 Example:
     # Prerequisite: generate the dual-modal checkpoint with lidar_phase.py.
     python aether/tools/viz_dualmodal.py \
-        --ckpt outputs/dualmodal/pandaset095_lidar.pth \
+        --ckpt outputs/train/pandaset-095/lidar.pth \
         --processed_dir data/pandaset/processed/095 --frame_idx 40 \
         --out_png outputs/pandaset095_dualmodal.png
 """
 from __future__ import annotations
-import os, sys, json
+import sys, json
 from pathlib import Path
-from dataclasses import asdict
 
 import numpy as np
 import torch
@@ -20,6 +19,8 @@ import matplotlib.pyplot as plt
 
 from aether.paths import AETHER_ROOT
 sys.path.insert(0, str(AETHER_ROOT))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 from aether.render.lidar_head import (
     LidarHead, LidarHeadConfig, build_raster_pts,
 )
@@ -138,7 +139,7 @@ def visualize(ckpt: Path, processed_dir: Path, frame_idx: int,
         )
     range_map = lout["range"]
     alpha_map = lout["alpha"]
-    intensity_map = lout["intensity"]
+    _intensity_map = lout["intensity"]
     pts_pred, _ = _unproject_range_map(range_map, alpha_map, lcfg, lidar2world_t, device)
     print(f"[viz] predicted lidar pts: {pts_pred.shape[0]}")
 

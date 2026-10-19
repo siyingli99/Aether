@@ -1,70 +1,74 @@
-export type RoadPose = { x: number; y: number; z: number; yaw: number }
-export type TrajectoryPoint = RoadPose & { t: number; speed?: number | null }
-export type Controller = {
-  kind: 'recorded' | 'open_loop' | 'limsim' | 'plugin'
-  trajectory: TrajectoryPoint[]
-  plugin?: string | null
-  params: Record<string, unknown>
+export type XY = [number, number]
+
+export interface SceneSummary {
+  id: string; name?: string; dataset?: string; frame_dt?: number; frames?: number
+  vehicle?: string; has_map?: boolean; has_network?: boolean; error?: string
 }
-export type ActorEdit = {
-  id: string
-  source: 'scene' | 'external'
-  operation: 'keep' | 'remove' | 'edit' | 'replace' | 'add'
-  node_class: 'RigidNodes' | 'DeformableNodes' | 'SMPLNodes'
-  instance_id?: number | null
-  label: string
-  asset_id?: string | null
-  start?: RoadPose | null
-  size?: [number, number, number] | null
-  controller: Controller
+
+export interface AgentInfo {
+  id: string; title: string; kind: 'builtin' | 'adapter'; description: string
+  cameras: string[]; lidar: boolean; plan?: { frame: string; axes: string; dt: number }
 }
-export type Experiment = {
-  schema_version: 'aether.experiment.v1'
-  id?: string
-  name: string
-  scene_id: string
-  ego: { start: RoadPose; speed: number }
-  actors: ActorEdit[]
-  algorithm: { adapter: string; cuda: string; config_path?: string | null }
-  runtime: {
-    max_steps: number
-    seed: number
-    difix: { enabled: boolean; cuda: string; max_side: number; model: string; timestep: number; dtype: string }
-  }
+
+export interface VehicleProfile { name: string; length: number; width: number; height: number; wheelbase: number }
+
+export interface Catalog {
+  scenes: SceneSummary[]; agents: AgentInfo[]; assets: string[]; vehicles: VehicleProfile[]
+  defaults: Scenario
 }
-export type SceneEntry = {
-  id: string; name: string; available: boolean; has_map: boolean; has_limsim: boolean
+
+export interface Lane { id: string; kind: string; centerline: XY[]; polygon: XY[]; width: number }
+
+export interface RecordedActor {
+  ref: string; kind: 'vehicle' | 'pedestrian'; x: number; y: number; yaw: number
+  length: number; width: number; height: number; first_frame: number; last_frame: number; path: XY[]
 }
-export type AssetEntry = {
-  id: string; name: string; source: string; available: boolean; metadata: Record<string, unknown>
+
+export interface SceneDetail {
+  id: string; name: string; dataset: string; frame_dt: number; duration_s: number
+  vehicle: { name: string; length: number; width: number; height: number; wheelbase: number }
+  route: XY[]; ego_start: { x: number; y: number; yaw: number }
+  lanes: Lane[]; drivable: XY[][]; recorded: RecordedActor[]
 }
-export type Catalog = {
-  scenes: SceneEntry[]
-  assets: AssetEntry[]
-  controllers: { id: string; name: string; kind: string; entrypoint?: string }[]
-  adapters: { id: string; name: string; available: boolean }[]
-  coordinates: Record<string, string>
+
+/** A vehicle placed in the editor (becomes traffic.vehicles[] in the scenario). */
+export interface PlacedVehicle {
+  id: string; x: number; y: number; yaw: number
+  length: number; width: number; height: number
+  controller: 'static' | 'constant' | 'plugin'
+  speed: number; pluginClass: string
+  replaces?: string            // "RigidNodes/3": move a reconstructed car instead of an asset
 }
-export type SceneActor = {
-  id: string; source: 'scene'; node_class: ActorEdit['node_class']; instance_id: number
-  label: string; size: [number, number, number]; first_frame: number; last_frame: number
-  trajectory: { frame: number; x: number; y: number; yaw: number }[]
+
+export interface Scenario {
+  scene: string; name?: string | null
+  sim: { dt: number; max_steps: number; seed: number }
+  ego: { vehicle: string; start: 'logged' | { x: number; y: number; yaw: number }; speed: 'logged' | number; allow_reverse: boolean }
+  traffic: { hide_originals: boolean; keep: string[]; assets: string[]; max_vehicles: number; model: Record<string, unknown> | null; vehicles: Record<string, unknown>[] }
+  refine: { enabled: boolean; required: boolean; model: string; max_side: number; timestep: number; dtype: string; cuda: string | null }
+  termination: { stop_on: string[]; at_fault_only: boolean; off_road_tolerance: number; [k: string]: unknown }
+  output: { videos: boolean; bev_fps: number; trajectory_hz: number; [k: string]: unknown }
+  agent: { name: string | null; cuda: string; options: Record<string, unknown> }
+  [k: string]: unknown
 }
-export type Topology = {
-  lanes: { id: string; kind: string; width: number; points: [number, number][] }[]
-  route: [number, number][]
-  bounds: { min_x: number; max_x: number; min_y: number; max_y: number } | null
-  location?: string
+
+export interface Job {
+  id: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  scene: string; agent: string; created: string; dir: string; run?: string | null; returncode?: number | null
 }
-export type Preview = { status: string; base_url?: string; mosaic?: string; cameras?: Record<string, string> }
-export type SceneDetail = {
-  scene: SceneEntry
-  topology: Topology
-  actors: SceneActor[]
-  experiment: Experiment
-  preview: Preview
+
+export interface Metrics {
+  nc: number; dac: number; ttc: number; comfort: number; ep: number; rc: number; score: number
+  duration_s: number; distance_m: number; mean_speed: number; collisions: number
+  at_fault_collisions: number; static_collisions: number; off_road_steps: number
+  min_ttc_s: number | null; terminated_by: string | null; comfort_detail: Record<string, number>
 }
-export type Job = {
-  id: string; experiment_id: string; status: string; log_path: string; result_path: string
-  pid?: number; returncode?: number; result?: Record<string, unknown>
+
+export interface RunSummary {
+  id: string; scene: string; agent: string; started: string; steps: number
+  terminated_by: string | null; wall_s: number; metrics: Metrics | null; complete: boolean
+}
+
+export interface RunDetail extends RunSummary {
+  events: Record<string, string>[]; files: string[]; base_url: string; run: Record<string, unknown>
 }

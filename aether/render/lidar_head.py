@@ -15,9 +15,12 @@ gsplat collision:
 """
 from __future__ import annotations
 
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
+
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn

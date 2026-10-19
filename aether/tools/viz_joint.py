@@ -3,15 +3,14 @@ Input/Output: Reads an existing joint checkpoint and LiDAR sidecar; writes one c
 Example:
     # Prerequisite: generate the checkpoint and sidecar with joint_phase.py.
     python aether/tools/viz_joint.py \
-        --resume_from data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth \
-        --lidar_sidecar outputs/dualmodal/aether_joint/pandaset/scene095_joint/lidar_sidecar_frozen.pt \
+        --resume_from data/scenes/pandaset-095/recon/checkpoint.pth \
+        --lidar_sidecar outputs/train/pandaset-095/joint/lidar_sidecar_frozen.pt \
         --frame_idx 0 --cam_idx 0 --out_png outputs/pandaset095_joint.png
 """
 from __future__ import annotations
-import os, sys, json, argparse, logging
+import sys, json, argparse, logging
 from pathlib import Path
 
-import numpy as np
 import torch
 import matplotlib
 matplotlib.use("Agg")
@@ -20,6 +19,8 @@ from omegaconf import OmegaConf
 
 from aether.paths import AETHER_ROOT
 sys.path.insert(0, str(AETHER_ROOT))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 from aether.paths import DRIVESTUDIO_ROOT  # noqa: F401,E402
 # sys.path set by aether.paths
 

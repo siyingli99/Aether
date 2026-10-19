@@ -3,12 +3,12 @@ Input/Output: Reads an RGB checkpoint and processed PandaSet scene; writes a dua
 Example:
     # Prerequisite: train the referenced RGB checkpoint and preprocess the scene.
     python aether/train/lidar_phase.py \
-        --rgb_ckpt data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth \
+        --rgb_ckpt data/scenes/pandaset-095/recon/checkpoint.pth \
         --processed_dir data/pandaset/processed/095 \
-        --out_ckpt outputs/dualmodal/pandaset095_lidar.pth --num_iters 1500
+        --out_ckpt outputs/train/pandaset-095/lidar.pth --num_iters 1500
 """
 from __future__ import annotations
-import os, sys, time
+import sys, time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Any
@@ -18,6 +18,8 @@ import torch
 
 from aether.paths import AETHER_ROOT
 sys.path.insert(0, str(AETHER_ROOT))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 from aether.render.lidar_head import (
     LidarHead, LidarHeadConfig, GaussianLidarFeatures, build_raster_pts,
 )

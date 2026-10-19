@@ -20,6 +20,8 @@ import yaml
 
 from aether.paths import DRIVESTUDIO_ROOT as _DS_ROOT  # noqa: E402
 sys.path.insert(0, str(_DS_ROOT))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 from aether.paths import AETHER_ROOT
 sys.path.insert(0, str(AETHER_ROOT))
 
@@ -40,9 +42,9 @@ from aether.refine.pair_utils import (
 
 
 _SCENES = {
-    "nuscenes088": "outputs/dualmodal/aether_joint/nuscenes/scene088_joint",
-    "nuscenes0383": "outputs/dualmodal/aether_joint/nuscenes/scene0383_joint",
-    "pandaset017": "outputs/dualmodal/aether_joint/pandaset/scene017_joint",
+    "nuscenes088": "outputs/train/nuscenes-0106/joint",
+    "nuscenes0383": "outputs/train/nuscenes-0383/joint",
+    "pandaset017": "outputs/train/pandaset-017/joint",
 }
 _AETHER = AETHER_ROOT
 

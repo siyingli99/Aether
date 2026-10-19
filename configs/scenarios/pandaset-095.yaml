@@ -1,0 +1,6 @@
+# PandaSet 095.  No HD map: off-road checks are disabled automatically.
+scene: pandaset-095
+sim: {dt: 0.25, max_steps: 39, seed: 0}
+ego: {vehicle: auto, start: logged, speed: logged}
+traffic: {hide_originals: true}
+refine: {enabled: true, required: false}

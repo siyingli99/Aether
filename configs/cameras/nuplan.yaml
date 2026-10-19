@@ -1,0 +1,71 @@
+# nuPlan rig presented with nuScenes camera names.  ``index`` is the camera id
+# in the DriveStudio nuPlan reconstruction (F0=0, L0=1, R0=2, L1=3, R1=4,
+# L2=5, R2=6, B0=7).  L1/R1 (~112 deg) match nuScenes' rear-side cameras
+# (~110 deg) better than L2/R2 (~141 deg).
+cams:
+  CAM_FRONT:
+    index: 0
+    extrinsics: &front_ext
+      v2c_rot: [91.44963053, 0.50187361, 89.82261635]
+      v2c_trans: [-0.04438116, 1.56405412, -1.63096634]
+      l2c_rot: [91.44963053, 0.50187361, 89.82261635]
+      l2c_trans: [-0.04438116, 1.56405412, -1.63096634]
+    intrinsics: &intrinsics
+      H: 360
+      W: 640
+      fovx: 63.71026476
+      fovy: 38.53052862
+      cx: 320.0
+      cy: 186.66666667
+      # Brown-Conrady coefficients of the nuPlan calibration, for reference:
+      # AETHER renders ideal pinhole images.
+      distortion: [-0.356123, 0.172545, -0.00213, 0.000464, -0.05231]
+  CAM_FRONT_LEFT:
+    index: 1
+    extrinsics:
+      v2c_rot: [90.54437592, 0.79214513, 34.81793585]
+      v2c_trans: [-1.29066170, 1.51375039, -1.04338678]
+      l2c_rot: [90.54437592, 0.79214513, 34.81793585]
+      l2c_trans: [-1.29066170, 1.51375039, -1.04338678]
+    intrinsics: *intrinsics
+  CAM_FRONT_RIGHT:
+    index: 2
+    extrinsics:
+      v2c_rot: [89.60475713, -0.64373284, 145.45382551]
+      v2c_trans: [1.26490192, 1.50483844, -1.06559419]
+      l2c_rot: [89.60475713, -0.64373284, 145.45382551]
+      l2c_trans: [1.26490192, 1.50483844, -1.06559419]
+    intrinsics: *intrinsics
+  CAM_BACK_LEFT:
+    index: 3
+    extrinsics:
+      v2c_rot: [92.04510198, 0.70219629, -22.21701071]
+      v2c_trans: [-1.47323124, 1.39368699, -0.08030852]
+      l2c_rot: [92.04510198, 0.70219629, -22.21701071]
+      l2c_trans: [-1.47323124, 1.39368699, -0.08030852]
+    intrinsics: *intrinsics
+  CAM_BACK_RIGHT:
+    index: 4
+    extrinsics:
+      v2c_rot: [91.44725231, 0.13666497, -158.03906980]
+      v2c_trans: [1.40571076, 1.42012381, -0.07962468]
+      l2c_rot: [91.44725231, 0.13666497, -158.03906980]
+      l2c_trans: [1.40571076, 1.42012381, -0.07962468]
+    intrinsics: *intrinsics
+  CAM_BACK:
+    index: 7
+    extrinsics:
+      v2c_rot: [90.19399032, -0.41028674, -89.71929061]
+      v2c_trans: [0.01362285, 1.48790076, -0.48159726]
+      l2c_rot: [90.19399032, -0.41028674, -89.71929061]
+      l2c_trans: [0.01362285, 1.48790076, -0.48159726]
+    intrinsics: *intrinsics
+
+cam_rect:
+  rot: [0.0, 0.0, 0.0]
+  trans: [0.0, 0.0, 0.0]
+
+cam_align:
+  - [CAM_FRONT_LEFT, CAM_FRONT, CAM_FRONT_RIGHT]
+  - [CAM_BACK_RIGHT, CAM_BACK, CAM_BACK_LEFT]
+

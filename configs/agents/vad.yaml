@@ -1,0 +1,13 @@
+name: vad
+title: VAD
+description: >-
+  VAD (ICCV'23) through VAD_SIM.  Same image contract as UniAD (800x450 render,
+  upsampled to 1600x900 inside the adapter).
+command: [bash, "${AETHER_EXTERNAL}/VAD_SIM/tools/e2e.sh", "${cuda}", "${workdir}"]
+env: {PYTHONUNBUFFERED: "1"}
+ready: ["ready for"]
+protocol: tuple
+input:
+  cameras: [CAM_FRONT, CAM_FRONT_RIGHT, CAM_FRONT_LEFT, CAM_BACK, CAM_BACK_LEFT, CAM_BACK_RIGHT]
+  lidar: false
+output: {dt: 0.5, frame: lidar, axes: rfu}

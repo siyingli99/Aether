@@ -69,7 +69,7 @@ lidar_pairs/
 reports/
 studio_workspace/
 web/node_modules/
-!configs/studio/traffic/*.npz
+!assets/demo_actors/*.npz
 
 # Superseded local integration prototypes
 tess_bridge/

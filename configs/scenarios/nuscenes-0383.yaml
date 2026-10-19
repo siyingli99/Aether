@@ -1,0 +1,13 @@
+# nuScenes scene-0383 (Singapore One North), 10 Hz reconstruction.
+# Background traffic from LimSim; the recorded vehicles are hidden and
+# replaced by 3DRealCar Gaussian assets.
+scene: nuscenes-0383
+sim: {dt: 0.25, max_steps: 39, seed: 0}
+ego: {vehicle: auto, start: logged, speed: logged}
+traffic:
+  hide_originals: true
+  assets: [3drealcar_2024_06_04_15_34_51]
+  max_vehicles: 3
+  model: {type: limsim, host: 127.0.0.1, port: 8766}
+refine: {enabled: true, required: true}
+termination: {stop_on: [vehicle_collision, static_collision, off_scene]}

@@ -3,7 +3,7 @@ Input/Output: Reads a joint run and trained refiner bundle; writes a distilled b
 Example:
     # Prerequisite: generate the joint checkpoint/sidecar and refiner bundle first.
     python aether/refine/distill_multimodal.py --scene pandaset095 \
-        --joint_dir outputs/dualmodal/aether_joint/pandaset/scene095_joint \
+        --joint_dir outputs/train/pandaset-095/joint \
         --refiner_bundle outputs/multimodal_refine_v2/unified/unified_multimodal.bundle.pth \
         --rounds 3 --inner_steps 100 --out outputs/distilled/pandaset095
 """
@@ -20,6 +20,8 @@ import torch.nn.functional as F
 
 from aether.paths import AETHER_ROOT, DRIVESTUDIO_ROOT as _DS_ROOT  # noqa: E402
 sys.path.insert(0, str(_DS_ROOT))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 sys.path.insert(0, str(AETHER_ROOT))
 
 import matplotlib
@@ -41,10 +43,10 @@ from aether.train.joint_phase import gt_to_spherical_grid  # noqa: F401 (eval re
 
 
 _SCENES = {
-    "nuscenes088": "outputs/dualmodal/aether_joint/nuscenes/scene088_joint",
-    "nuscenes0383": "outputs/dualmodal/aether_joint/nuscenes/scene0383_joint",
-    "pandaset017": "outputs/dualmodal/aether_joint/pandaset/scene017_joint",
-    "pandaset120": "outputs/dualmodal/aether_joint/pandaset/scene120_joint",
+    "nuscenes088": "outputs/train/nuscenes-0106/joint",
+    "nuscenes0383": "outputs/train/nuscenes-0383/joint",
+    "pandaset017": "outputs/train/pandaset-017/joint",
+    "pandaset120": "outputs/train/pandaset-120/joint",
 }
 _AETHER = AETHER_ROOT
 

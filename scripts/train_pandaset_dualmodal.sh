@@ -2,7 +2,7 @@
 # =============================================================================
 # AETHER 双模态(RGB+LiDAR)一键训练 + 可视化脚本
 #
-# 复刻 outputs/dualmodal/aether_joint/nuscenes/scene088 的完整流程, 套用到 pandaset:
+# 输出: outputs/train/pandaset-<SCENE>/{recon,joint}; 之后用 python -m aether import 生成场景包
 #   Phase A : DriveStudio 纯 RGB 几何重建 (tools/train.py, 30k 步)
 #   Phase B : AETHER 联合 RGB+LiDAR 微调   (aether/train/joint_phase.py, 默认 10k 步)
 #   Phase C : 可视化 (viz_joint 单帧四联图 + viz_joint_video 全程视频)
@@ -66,11 +66,11 @@ echo ">>> 数据检查通过: ${SCENE_DATA} (含 lidar)"
 
 # ============================================================================
 # Phase A : DriveStudio 纯 RGB 重建 (30k 步, 较耗时)
-#   - 输出到 AETHER/data/checkpoints/pandaset_outputs/scene_recon_full/<RUN_NAME>
+#   - 输出到 AETHER/outputs/train/pandaset-<SCENE>/recon
 #     (与现有 pandaset 场景的 checkpoint 约定一致)
 # ============================================================================
-PHASE_A_OUT_ROOT="${AETHER_ROOT}/data/checkpoints/pandaset_outputs"
-PHASE_A_OUT="${PHASE_A_OUT_ROOT}/scene_recon_full/${RUN_NAME}"
+PHASE_A_OUT_ROOT="${AETHER_ROOT}/outputs/train"
+PHASE_A_OUT="${PHASE_A_OUT_ROOT}/pandaset-${SCENE}/recon"
 
 if [ -z "${PHASE_A_CKPT}" ]; then
     echo ">>> [Phase A] 未提供已有 checkpoint, 开始 DriveStudio 重建训练..."
@@ -82,8 +82,8 @@ if [ -z "${PHASE_A_CKPT}" ]; then
     python tools/train.py \
         --config_file configs/omnire.yaml \
         --output_root "${PHASE_A_OUT_ROOT}" \
-        --project scene_recon_full \
-        --run_name "${RUN_NAME}" \
+        --project "pandaset-${SCENE}" \
+        --run_name recon \
         dataset="${DATASET_CFG}" \
         data.data_root="${DATA_ROOT}" \
         data.scene_idx="'${SCENE}'" \
@@ -107,9 +107,9 @@ echo ">>> [Phase A] 完成, checkpoint = ${PHASE_A_CKPT}"
 echo ">>> [Phase B] 开始联合 RGB+LiDAR 微调 (${JOINT_ITERS} 步)..."
 conda activate "${CONDA_ENV}"
 
-JOINT_OUT_ROOT="${AETHER_ROOT}/outputs/dualmodal/aether_joint/pandaset"
-JOINT_RUN="scene${SCENE}_joint"
-JOINT_DIR="${JOINT_OUT_ROOT}/pandaset/${JOINT_RUN}"
+JOINT_OUT_ROOT="${AETHER_ROOT}/outputs/train"
+JOINT_RUN="joint"
+JOINT_DIR="${JOINT_OUT_ROOT}/pandaset-${SCENE}/${JOINT_RUN}"
 
 # 仍在 drivestudio 下运行(SMPL 等相对路径), data_root 用绝对路径覆盖。
 cd "${DS_ROOT}"
@@ -117,7 +117,7 @@ python "${AETHER_ROOT}/aether/train/joint_phase.py" \
     --config_file "${DS_ROOT}/configs/omnire.yaml" \
     --resume_from "${PHASE_A_CKPT}" \
     --output_root "${JOINT_OUT_ROOT}" \
-    --project pandaset \
+    --project "pandaset-${SCENE}" \
     --run_name "${JOINT_RUN}" \
     --num_iters "${JOINT_ITERS}" \
     dataset="${DATASET_CFG}" \

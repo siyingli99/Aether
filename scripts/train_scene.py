@@ -10,11 +10,12 @@ import os
 import runpy
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 import aether  # noqa: F401
 
 from aether.paths import DRIVESTUDIO_ROOT

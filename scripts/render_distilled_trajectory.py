@@ -1,17 +1,16 @@
 """Function: Re-render a recorded camera trajectory from a distilled 3DGS scene.
 Input/Output: Reads a trajectory, joint directory, and distilled artifacts; writes six-camera frames and videos.
 Example:
-    # Prerequisite: generate camera_trajectory.json, background_distilled.pth, and sidecar_distilled.pt.
+    # Prerequisite: a run with output.io_trace=true, background_distilled.pth and sidecar_distilled.pt.
     python scripts/render_distilled_trajectory.py \
-        --trajectory aether_results/pandaset/pandaset_095_multimodal/none/easy/camera_trajectory.json \
-        --joint_dir outputs/dualmodal/aether_joint/pandaset/scene095_joint \
+        --trajectory outputs/runs/<run>/logs/render_poses.json \
+        --joint_dir outputs/train/pandaset-095/joint \
         --distill_dir outputs/distilled/pandaset095 --out outputs/distilled/pandaset095/replay
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -80,7 +79,7 @@ def _render_step_strip(renderer, step_rec: dict, cam_order: list) -> np.ndarray:
         H, W = int(cam["H"]), int(cam["W"])
         out = renderer.render(
             c2w_4x4=c2w, K_3x3=K, H=H, W=W,
-            frame_idx=frame_idx, cam_idx=_PANDA_CAM_ID.get(name, 0),
+            frame_idx=frame_idx, cam_idx=int(cam.get("index", _PANDA_CAM_ID.get(name, 0))),
         )
         rgb = (out["rgb"].clamp(0, 1).detach().cpu().numpy() * 255).astype(np.uint8)
         tiles.append(rgb)
@@ -97,7 +96,7 @@ def _load_enhanced_strip(ad_input_dir: Path, step: int) -> np.ndarray | None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trajectory", required=True,
-                    help="camera_trajectory.json from closed_loop_multimodal.py")
+                    help="logs/render_poses.json of a run made with output.io_trace=true")
     ap.add_argument("--joint_dir", required=True,
                     help="Joint scene dir (checkpoint_final.pth + sidecar)")
     ap.add_argument("--distill_dir", required=True,
@@ -118,7 +117,8 @@ def main():
     distill_dir = Path(args.distill_dir).expanduser()
     if not distill_dir.is_absolute():
         distill_dir = (_REPO / distill_dir).resolve()
-    cl_dir = Path(args.closed_loop_dir) if args.closed_loop_dir else traj_path.parent
+    cl_dir = Path(args.closed_loop_dir) if args.closed_loop_dir else (
+        traj_path.parent.parent if traj_path.parent.name == "logs" else traj_path.parent)
     out_dir = Path(args.out) if args.out else cl_dir / "distilled_rerender"
     out_dir.mkdir(parents=True, exist_ok=True)
     strip_dir = out_dir / "distilled_direct_strip"
@@ -139,7 +139,9 @@ def main():
 
     direct_frames = []
     compare_frames = []
-    ad_input_dir = cl_dir / "ad_input"
+    ad_input_dir = cl_dir / "logs" / "io"
+    if not ad_input_dir.is_dir():
+        ad_input_dir = cl_dir / "ad_input"
 
     for step_rec in steps:
         step = int(step_rec["step"])

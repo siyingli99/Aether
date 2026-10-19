@@ -4,9 +4,9 @@ Example:
     # Prerequisite: train the referenced RGB checkpoint first.
     python aether/train/joint_phase.py \
         --config_file third_party/drivestudio/configs/omnire.yaml \
-        --resume_from data/checkpoints/pandaset_outputs/scene_recon_full/scene_095_6cams_with_humans/checkpoint_final.pth \
-        --output_root outputs/dualmodal --project aether_joint/pandaset \
-        --run_name scene095_joint --num_iters 10000 --freeze_geometry \
+        --resume_from data/scenes/pandaset-095/recon/checkpoint.pth \
+        --output_root outputs/train --project pandaset-095 \
+        --run_name joint --num_iters 10000 --freeze_geometry \
         dataset=pandaset/6cams data.data_root=data/pandaset/processed data.scene_idx=95
 """
 from __future__ import annotations
@@ -33,6 +33,8 @@ from omegaconf import OmegaConf
 
 from aether.paths import AETHER_ROOT, DRIVESTUDIO_ROOT, resolve_data_root
 sys.path.insert(0, str(DRIVESTUDIO_ROOT))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 sys.path.insert(0, str(AETHER_ROOT))
 
 from datasets.driving_dataset import DrivingDataset  # noqa: E402

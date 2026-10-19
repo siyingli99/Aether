@@ -1,33 +1,11 @@
-"""External traffic integration for AETHER's camera-only closed loop.
+"""Background traffic: model interface, built-in models and the TCP protocol.
 
-Imports are lazy so the standalone Windows bridge can use the stdlib-only
-protocol module without installing AETHER's NumPy/SciPy rendering stack.
+Write a traffic model by subclassing :class:`TrafficModel` (whole traffic
+flow) or :class:`VehicleController` (one vehicle); see "Plug in a traffic model" in README.md.
+The protocol module is stdlib-only so external simulators can vendor it.
 """
-
+from .model import AgentState, TrafficModel, TrafficScene, VehicleController, load_class
 from .protocol import EgoState, TrafficFrame, VehicleState
 
-__all__ = [
-    "EgoState",
-    "FrameTransform",
-    "LimSimTrafficClient",
-    "ReplayTrafficClient",
-    "TrafficActorProvider",
-    "TrafficFrame",
-    "VehicleState",
-    "nuscenes_scene_local_to_ds",
-]
-
-
-def __getattr__(name):
-    if name in {"LimSimTrafficClient", "ReplayTrafficClient"}:
-        from .client import LimSimTrafficClient, ReplayTrafficClient
-        return {"ReplayTrafficClient": ReplayTrafficClient,
-                "LimSimTrafficClient": LimSimTrafficClient}[name]
-    if name in {"FrameTransform", "nuscenes_scene_local_to_ds"}:
-        from .coordinates import FrameTransform, nuscenes_scene_local_to_ds
-        return {"FrameTransform": FrameTransform,
-                "nuscenes_scene_local_to_ds": nuscenes_scene_local_to_ds}[name]
-    if name == "TrafficActorProvider":
-        from .provider import TrafficActorProvider
-        return TrafficActorProvider
-    raise AttributeError(name)
+__all__ = ["AgentState", "TrafficModel", "TrafficScene", "VehicleController", "load_class",
+           "EgoState", "TrafficFrame", "VehicleState"]

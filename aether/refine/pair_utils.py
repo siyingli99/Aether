@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from aether.paths import AETHER_ROOT, resolve_data_root
+from aether.paths import resolve_data_root
 from aether.render.lidar_head import LidarHeadConfig
 from aether.train.joint_phase import gt_to_spherical_grid
 

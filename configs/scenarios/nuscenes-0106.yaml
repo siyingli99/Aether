@@ -1,0 +1,3 @@
+# nuScenes scene-0106 (Boston Seaport; trainval index 88); keyframes only (2 Hz reconstruction).
+extends: nuscenes-0383.yaml
+scene: nuscenes-0106

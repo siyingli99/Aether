@@ -1,0 +1,18 @@
+name: uniad
+title: UniAD
+description: >-
+  UniAD (CVPR'23) through the UniAD_SIM closed-loop adapter.  The adapter
+  resizes every camera to 1600x900 and doubles the intrinsics, i.e. it expects
+  the 800x450 nuScenes render.  Do not change the scene render resolution.
+command: [bash, "${AETHER_ROOT}/third_party/uniad_sim/tools/e2e.sh", "${cuda}", "${workdir}"]
+env:
+  PYTHONUNBUFFERED: "1"
+  # Per-step UniAD visualisation (needs data_temp/nus_vis_pose_info.pkl from UniAD_SIM).
+  UNIAD_VIS: "0"
+ready: ["ready for"]
+protocol: tuple
+input:
+  cameras: [CAM_FRONT, CAM_FRONT_RIGHT, CAM_FRONT_LEFT, CAM_BACK, CAM_BACK_LEFT, CAM_BACK_RIGHT]
+  image_size: null
+  lidar: false
+output: {dt: 0.5, frame: lidar, axes: rfu}

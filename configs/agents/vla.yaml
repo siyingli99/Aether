@@ -1,0 +1,13 @@
+name: vla
+title: Impromptu-VLA
+description: >-
+  Qwen2.5-VL based vision-language-action planner (Impromptu-VLA).  Three
+  front cameras plus a text prompt with the ego history.
+command: [bash, "${AETHER_EXTERNAL}/Impromptu-VLA/tools/e2e.sh", "${cuda}", "${workdir}"]
+env: {PYTHONUNBUFFERED: "1"}
+ready: ["ready for"]
+protocol: tuple
+input:
+  cameras: [CAM_FRONT, CAM_FRONT_LEFT, CAM_FRONT_RIGHT]
+  lidar: false
+output: {dt: 0.5, frame: rear_axle, axes: rfu}

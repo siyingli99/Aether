@@ -1,24 +1,16 @@
-"""AETHER simulation primitives: Actor / Scene / Policy.
+"""Closed-loop simulation: environment, collision checks, route, episode runner."""
+from .collision import CollisionChecker, CollisionConfig, Event
+from .route import LEFT, RIGHT, STRAIGHT, Route
 
-Goals
------
-1. Backward compatible with ``aether/planner/npc.py:ActorReplay`` — exposes
-   ``pose_at(frame)`` returning the same list of dicts the renderer expects.
-2. Reactive: each actor owns an :class:`ActorPolicy` that can be log-replay,
-   IDM-following, manual-override, or any user-defined subclass.
-3. Editable: ``Scene.add/remove/replace`` for the BEV editor and CLI tools.
-4. Introspectable: every actor carries a stable integer ``actor_id`` plus
-   per-frame state (pos, heading, velo) for BEV visualization.
-"""
-from .actor import Actor, ActorState, Scene
-from .policy import (
-    ActorPolicy,
-    LogReplayPolicy,
-    IDMFollowerPolicy,
-    ManualOverridePolicy,
-)
+__all__ = ["CollisionChecker", "CollisionConfig", "Event", "Route", "LEFT", "RIGHT", "STRAIGHT",
+           "AetherEnv", "run_episode"]
 
-__all__ = [
-    "Actor", "ActorState", "Scene",
-    "ActorPolicy", "LogReplayPolicy", "IDMFollowerPolicy", "ManualOverridePolicy",
-]
+
+def __getattr__(name):            # heavy imports (torch, renderer) only on demand
+    if name == "AetherEnv":
+        from .env import AetherEnv
+        return AetherEnv
+    if name == "run_episode":
+        from .runner import run_episode
+        return run_episode
+    raise AttributeError(name)

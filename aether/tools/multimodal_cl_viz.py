@@ -6,8 +6,11 @@ reused by offline tools too. Runs in the ``aether`` conda env.
 """
 from __future__ import annotations
 
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
+
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch

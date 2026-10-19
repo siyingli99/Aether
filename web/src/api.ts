@@ -1,10 +1,7 @@
-import type { Catalog, Experiment, Job, Preview, SceneDetail } from './types'
+import type { Catalog, Job, RunDetail, RunSummary, Scenario, SceneDetail } from './types'
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
-  })
+  const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) } })
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail))
@@ -14,15 +11,17 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   catalog: () => request<Catalog>('/api/catalog'),
-  scene: (id: string) => request<SceneDetail>(`/api/scenes/${id}`),
-  preview: (id: string) => request<Preview>(`/api/scenes/${id}/preview`),
-  createPreview: (id: string) => request<Preview>(`/api/scenes/${id}/preview`, { method: 'POST' }),
-  validate: (experiment: Experiment) => request<{ valid: boolean; warnings: string[] }>(
-    '/api/experiments/validate', { method: 'POST', body: JSON.stringify(experiment) },
-  ),
-  save: (experiment: Experiment) => request<Record<string, string>>(
-    '/api/experiments', { method: 'POST', body: JSON.stringify(experiment) },
-  ),
-  run: (id: string) => request<Job>(`/api/experiments/${id}/run`, { method: 'POST' }),
-  job: (id: string) => request<Job>(`/api/jobs/${id}`),
+  scene: (id: string) => request<SceneDetail>(`/api/scenes/${encodeURIComponent(id)}`),
+  validate: (scenario: Scenario) => request<{ valid: boolean; errors?: { loc: string[]; msg: string }[] }>(
+    '/api/validate', { method: 'POST', body: JSON.stringify(scenario) }),
+  run: (scenario: Scenario, agent: string, cuda: string) =>
+    request<Job>('/api/runs', { method: 'POST', body: JSON.stringify({ scenario, agent, cuda }) }),
+  jobs: () => request<Job[]>('/api/jobs'),
+  cancel: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
+  results: () => request<RunSummary[]>('/api/results'),
+  result: (id: string) => request<RunDetail>(`/api/results/${encodeURIComponent(id)}`),
+  liveSocket: (jobId: string) => {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    return new WebSocket(`${proto}://${location.host}/api/jobs/${jobId}/live`)
+  },
 }

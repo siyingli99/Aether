@@ -1,11 +1,11 @@
 """Function: Reverse-distill enhanced closed-loop observations at recorded poses.
 Input/Output: Reads a multimodal rollout, joint run, sidecar, and refiner bundle; writes updated background and sidecar artifacts.
 Example:
-    # Prerequisite: generate camera_trajectory.json and distill_corpus in the rollout.
+    # Prerequisite: a closed-loop run with output.io_trace=true (logs/render_poses.json).
     python aether/refine/distill_from_closed_loop.py \
-        --closed_loop_dir aether_results/pandaset/pandaset_095_multimodal/none/easy \
-        --joint_dir outputs/dualmodal/aether_joint/pandaset/scene095_joint \
-        --lidar_sidecar outputs/dualmodal/aether_joint/pandaset/scene095_joint/lidar_sidecar_frozen.pt \
+        --closed_loop_dir outputs/runs/<run> \
+        --joint_dir outputs/train/pandaset-095/joint \
+        --lidar_sidecar outputs/train/pandaset-095/joint/lidar_sidecar_frozen.pt \
         --refiner_bundle outputs/multimodal_refine_v2/unified/unified_multimodal.bundle.pth \
         --out outputs/distilled/pandaset095
 """
@@ -16,7 +16,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict
 
 import numpy as np
 import torch
@@ -24,13 +24,14 @@ import torch.nn.functional as F
 
 _AETHER = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_AETHER))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 
 import aether  # noqa: F401  — injects vendored drivestudio + splatad_gsplat
 from aether.paths import AETHER_ROOT, DRIVESTUDIO_ROOT
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from PIL import Image
 
 from aether.render.ds_backend import DriveStudioRenderer
@@ -126,12 +127,14 @@ def backfill_corpus(cl_dir: Path, trajectory: dict, joint_dir: Path,
     manifest = []
     for rec in steps:
         step = int(rec["step"])
-        strip_path = cl_dir / "ad_input" / f"step_{step:04d}.jpg"
+        strip_path = cl_dir / "logs" / "io" / f"step_{step:04d}.jpg"
+        if not strip_path.exists():
+            strip_path = cl_dir / "ad_input" / f"step_{step:04d}.jpg"
         if not strip_path.exists():
             continue
         strip = np.asarray(Image.open(strip_path).convert("RGB"))
         cams = rec["cameras"]
-        order = [c for c in _STRIP_ORDER if c in cams] or list(cams.keys())
+        order = trajectory.get("cam_order") or [c for c in _STRIP_ORDER if c in cams] or list(cams.keys())
         w = int(cams[order[0]]["W"])
         obs_rgb = {}
         for i, cam in enumerate(order):
@@ -193,9 +196,12 @@ def main():
     out_dir = _abs_aether(args.out) if args.out else joint_dir / "distill_from_cl"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    traj_path = cl_dir / "camera_trajectory.json"
+    traj_path = cl_dir / "logs" / "render_poses.json"          # AETHER run with output.io_trace
     if not traj_path.exists():
-        raise FileNotFoundError(f"Missing {traj_path}")
+        traj_path = cl_dir / "camera_trajectory.json"            # pre-0.2 multimodal run
+    if not traj_path.exists():
+        raise FileNotFoundError(
+            f"{cl_dir} has no logs/render_poses.json; rerun with --set output.io_trace=true")
     trajectory = json.loads(traj_path.read_text())
     corpus_dir = cl_dir / "distill_corpus"
     if not (corpus_dir / "rgb").is_dir():
@@ -296,7 +302,7 @@ def main():
                         c2w = np.asarray(cam_info["c2w"], dtype=np.float32)
                         K = np.asarray(cam_info["K"], dtype=np.float32)
                         H, W = int(cam_info["H"]), int(cam_info["W"])
-                        cid = _PANDA_CAM_ID.get(cam, 0)
+                        cid = int(cam_info.get("index", _PANDA_CAM_ID.get(cam, 0)))
                         rgb = renderer.render_grad(
                             c2w, K, H, W, f, cam_idx=cid,
                             manage_overrides=False,

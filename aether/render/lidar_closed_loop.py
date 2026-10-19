@@ -21,7 +21,10 @@ applied/restored around the sweep so the trainer is left clean.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
+
+from typing import Dict, Tuple
 
 import numpy as np
 import torch

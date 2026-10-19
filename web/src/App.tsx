@@ -1,276 +1,174 @@
 import { useEffect, useMemo, useState } from 'react'
-import {
-  Activity, Box, Camera, Check, ChevronRight, CirclePlay, Code2, Database,
-  Map as MapIcon, Plus, Route, Save, Settings2, Sparkles, Square, Trash2,
-} from 'lucide-react'
+import { BarChart3, Car, Crosshair, Layers, Map as MapIcon, MousePointer2, Navigation, Play, Plus, Radio, Scan } from 'lucide-react'
 import { api } from './api'
-import CameraPanel from './CameraPanel'
-import MapCanvas from './MapCanvas'
-import type { ActorEdit, Catalog, Experiment, Job, Preview, RoadPose, SceneDetail } from './types'
+import Inspector from './Inspector'
+import LiveView from './LiveView'
+import MapEditor, { type Selection, type Tool } from './MapEditor'
+import Results from './Results'
+import Settings from './Settings'
+import { initialState, nearestLaneHeading, toScenario, type EditorState } from './scenario'
+import type { Catalog, Job, PlacedVehicle, SceneDetail } from './types'
 
-const blankPose = (): RoadPose => ({ x: 0, y: 0, z: 0, yaw: 0 })
-const newId = () => `studio-${Math.random().toString(36).slice(2, 10)}`
-
-function normalizeExperiment(value: Experiment): Experiment {
-  const algorithm = value.algorithm || { adapter: 'uniad', cuda: '0' }
-  const runtime = value.runtime || { max_steps: 39, seed: 0, difix: {} as Experiment['runtime']['difix'] }
-  const difix = runtime.difix || ({} as Experiment['runtime']['difix'])
-  return {
-    ...value,
-    ego: { ...value.ego, start: { ...blankPose(), ...(value.ego?.start || {}) } },
-    algorithm: { ...algorithm, adapter: algorithm.adapter || 'uniad', cuda: algorithm.cuda || '0' },
-    runtime: {
-      ...runtime,
-      max_steps: runtime.max_steps ?? 39,
-      seed: runtime.seed ?? 0,
-      difix: {
-        ...difix,
-        enabled: difix.enabled ?? true, cuda: difix.cuda || '0',
-        max_side: difix.max_side ?? 1024, model: difix.model || 'nvidia/difix',
-        timestep: difix.timestep ?? 199, dtype: difix.dtype || 'bf16',
-      },
-    },
-  }
-}
+type View = 'scenario' | 'live' | 'results'
+const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`
 
 export default function App() {
   const [catalog, setCatalog] = useState<Catalog | null>(null)
-  const [detail, setDetail] = useState<SceneDetail | null>(null)
-  const [experiment, setExperiment] = useState<Experiment | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [tab, setTab] = useState<'map' | 'cameras'>('map')
-  const [frame, setFrame] = useState(0)
-  const [drawMode, setDrawMode] = useState(false)
-  const [filter, setFilter] = useState<'all' | 'vehicles' | 'people'>('all')
-  const [message, setMessage] = useState('Ready')
-  const [busy, setBusy] = useState(false)
+  const [scene, setScene] = useState<SceneDetail | null>(null)
+  const [state, setState] = useState<EditorState | null>(null)
+  const [view, setView] = useState<View>('scenario')
+  const [tool, setTool] = useState<Tool>('select')
+  const [selection, setSelection] = useState<Selection>(null)
+  const [layers, setLayers] = useState({ lanes: true, route: true, recorded: true, labels: true })
+  const [fit, setFit] = useState(0)
   const [job, setJob] = useState<Job | null>(null)
-  const [logs, setLogs] = useState('')
+  const [focusRun, setFocusRun] = useState<string | null>(null)
+  const [notice, setNotice] = useState<{ kind: 'info' | 'error'; text: string } | null>(null)
 
   useEffect(() => {
-    api.catalog().then(value => {
-      setCatalog(value)
-      const first = value.scenes.find(scene => scene.id === 'nuscenes-0383') || value.scenes[0]
-      if (first) void loadScene(first.id)
-    }).catch(error => setMessage(error.message))
+    api.catalog().then(c => {
+      setCatalog(c)
+      const first = c.scenes.find(s => s.id === 'nuscenes-0383') ?? c.scenes.find(s => !s.error)
+      if (first) void openScene(c, first.id)
+    }).catch(e => setNotice({ kind: 'error', text: `Backend not reachable: ${e.message}` }))
+    api.jobs().then(js => { const running = js.find(j => j.status === 'running'); if (running) { setJob(running); setView('live') } })
   }, [])
 
-  async function loadScene(sceneId: string) {
-    setBusy(true); setMessage('Loading scene catalog…'); setSelectedId(null); setFrame(0)
+  async function openScene(c: Catalog, id: string) {
     try {
-      const value = await api.scene(sceneId)
-      setDetail(value)
-      setExperiment(normalizeExperiment(value.experiment))
-      setMessage(`${value.actors.length} reconstructed actors · ${value.topology.lanes.length} map lanes`)
-    } catch (error) { setMessage((error as Error).message) } finally { setBusy(false) }
+      const detail = await api.scene(id)
+      setScene(detail)
+      setState(prev => ({ ...initialState(c, detail, id), agent: prev?.agent ?? 'replay', cuda: prev?.cuda ?? '0' }))
+      setSelection(null)
+    } catch (e) { setNotice({ kind: 'error', text: (e as Error).message }) }
   }
 
-  useEffect(() => {
-    if (!detail || detail.preview.status !== 'running') return
-    const timer = window.setInterval(async () => {
-      const preview = await api.preview(detail.scene.id)
-      setDetail(current => current ? { ...current, preview } : current)
-      if (preview.status !== 'running') window.clearInterval(timer)
-    }, 1800)
-    return () => window.clearInterval(timer)
-  }, [detail?.scene.id, detail?.preview.status])
-
-  const selected = experiment?.actors.find(actor => actor.id === selectedId) || null
-  const sourceActor = detail?.actors.find(actor => actor.id === selectedId) || null
-  const visibleActors = useMemo(() => {
-    if (!experiment) return []
-    return experiment.actors.filter(actor => filter === 'all' || (filter === 'vehicles' ? actor.node_class === 'RigidNodes' : actor.node_class !== 'RigidNodes'))
-  }, [experiment, filter])
-
-  function updateActor(id: string, mutate: (actor: ActorEdit) => ActorEdit) {
-    setExperiment(current => current ? { ...current, actors: current.actors.map(actor => actor.id === id ? mutate(actor) : actor) } : current)
+  const update = (patch: Partial<EditorState>) => setState(s => s && { ...s, ...patch })
+  const updateVehicle = (id: string, patch: Partial<PlacedVehicle>) => {
+    setState(s => s && { ...s, placed: s.placed.map(v => v.id === id ? { ...v, ...patch } : v) })
+    if (patch.id && selection?.kind === 'vehicle' && selection.id === id) setSelection({ kind: 'vehicle', id: patch.id })
   }
 
-  function moveActor(id: string, pose: RoadPose) {
-    updateActor(id, actor => {
-      if (actor.controller.kind === 'open_loop') {
-        const trajectory = actor.controller.trajectory.length >= 2
-          ? actor.controller.trajectory.map((point, index) => index === 0 ? { ...point, ...pose } : point)
-          : [{ ...pose, t: 0 }, { ...pose, x: pose.x + 8, t: 4 }]
-        return { ...actor, operation: actor.source === 'external' ? 'add' : 'edit', start: pose, controller: { ...actor.controller, trajectory } }
-      }
-      return { ...actor, operation: actor.source === 'external' ? 'add' : 'edit', start: pose }
-    })
+  const egoPose = useMemo(() => state?.egoStart ?? scene?.ego_start ?? { x: 0, y: 0, yaw: 0 }, [state?.egoStart, scene])
+  const sceneInfo = catalog?.scenes.find(s => s.id === state?.sceneId)
+  const agent = catalog?.agents.find(a => a.id === state?.agent)
+
+  const addVehicle = (x: number, y: number) => {
+    if (!state || !scene) return
+    const n = state.placed.length + 1
+    let id = `v${n}`
+    while (state.placed.some(v => v.id === id)) id += "'"
+    const yaw = nearestLaneHeading(scene, x, y) ?? egoPose.yaw
+    update({ placed: [...state.placed, { id, x, y, yaw, length: 4.5, width: 1.85, height: 1.5, controller: 'constant', speed: 6, pluginClass: '' }] })
+    setSelection({ kind: 'vehicle', id }); setTool('select')
   }
 
-  function drawPoint(pose: RoadPose) {
-    if (!selectedId) return
-    updateActor(selectedId, actor => {
-      const existing = actor.controller.kind === 'open_loop' ? actor.controller.trajectory : []
-      const point = { ...pose, t: existing.length ? existing.at(-1)!.t + 2 : 0 }
-      const trajectory = [...existing, point]
-      return {
-        ...actor, operation: actor.source === 'external' ? 'add' : 'edit', start: trajectory[0],
-        controller: { kind: 'open_loop', trajectory, params: {} },
-      }
-    })
+  const replaceRecorded = (ref: string) => {
+    const a = scene?.recorded.find(r => r.ref === ref)
+    if (!a || !state) return
+    const id = `edit-${ref.split('/')[1]}`
+    update({ placed: [...state.placed, { id, x: a.x, y: a.y, yaw: a.yaw, length: a.length, width: a.width, height: a.height,
+                                        controller: 'static', speed: 0, pluginClass: '', replaces: ref }],
+             keep: state.keep.filter(k => k !== ref) })
+    setSelection({ kind: 'vehicle', id })
   }
 
-  function addVehicle() {
-    if (!catalog || !experiment) return
-    const asset = catalog.assets.find(item => item.available)
-    if (!asset) { setMessage('No 3DRealCar asset is available'); return }
-    const id = newId()
-    const actor: ActorEdit = {
-      id, source: 'external', operation: 'add', node_class: 'RigidNodes', label: 'vehicle',
-      asset_id: asset.id, start: blankPose(), size: [2, 4.5, 1.6],
-      controller: { kind: 'open_loop', trajectory: [{ ...blankPose(), t: 0 }, { ...blankPose(), x: 12, t: 6 }], params: {} },
-    }
-    setExperiment({ ...experiment, actors: [...experiment.actors, actor] })
-    setSelectedId(id); setTab('map'); setDrawMode(true)
-    setMessage('Vehicle added. Click the map to draw its trajectory.')
-  }
-
-  async function generatePreview() {
-    if (!detail) return
-    const preview = await api.createPreview(detail.scene.id)
-    setDetail({ ...detail, preview })
-  }
-
-  async function validateAndSave(run = false) {
-    if (!experiment) return
-    setBusy(true)
+  async function run() {
+    if (!state) return
     try {
-      const validation = await api.validate(experiment)
-      const manifest = await api.save(experiment)
-      const id = manifest.experiment_id
-      setExperiment(current => current ? { ...current, id } : current)
-      setMessage(validation.warnings.length ? validation.warnings.join(' · ') : 'Experiment is valid and saved')
-      if (run) {
-        const started = await api.run(id)
-        setJob(started); setLogs(''); setMessage(`Closed loop ${started.id} started`)
-        connectLogs(started.id)
-      }
-    } catch (error) { setMessage((error as Error).message) } finally { setBusy(false) }
+      const scenario = toScenario(state)
+      const check = await api.validate(scenario)
+      if (!check.valid) { setNotice({ kind: 'error', text: check.errors?.map(e => `${e.loc.join('.')}: ${e.msg}`).join('; ') ?? 'invalid' }); return }
+      const started = await api.run(scenario, state.agent, state.cuda)
+      setJob(started); setView('live'); setNotice(null)
+    } catch (e) { setNotice({ kind: 'error', text: (e as Error).message }) }
   }
 
-  function connectLogs(jobId: string) {
-    const protocol = location.protocol === 'https:' ? 'wss' : 'ws'
-    const socket = new WebSocket(`${protocol}://${location.host}/api/jobs/${jobId}/logs`)
-    socket.onmessage = event => {
-      const value = JSON.parse(event.data)
-      if (value.text) setLogs(current => (current + value.text).slice(-18000))
-      if (value.status) {
-        setMessage(`Closed loop ${value.status}`)
-        void api.job(jobId).then(setJob)
-      }
-    }
+  if (!catalog || !state || !scene) {
+    return <div className="boot"><div className="logo">Æ</div><p>{notice?.text ?? 'Connecting to AETHER…'}</p></div>
   }
-
-  if (!catalog || !detail || !experiment) return <div className="boot"><Sparkles/><span>{message}</span></div>
 
   return (
-    <div className="app-shell">
+    <div className="shell">
       <header className="topbar">
-        <div className="brand"><div className="brand-mark"><Sparkles size={19}/></div><div><strong>AETHER</strong><span>STUDIO</span></div></div>
-        <div className="experiment-title">
-          <span>EXPERIMENT</span>
-          <input value={experiment.name} onChange={event => setExperiment({ ...experiment, name: event.target.value })} />
-        </div>
-        <div className="top-actions">
-          <button onClick={() => void validateAndSave(false)} disabled={busy}><Check size={15}/> Validate</button>
-          <button onClick={() => void validateAndSave(false)} disabled={busy}><Save size={15}/> Save</button>
-          <button className="run" onClick={() => void validateAndSave(true)} disabled={busy || job?.status === 'running'}><CirclePlay size={16}/> Run closed loop</button>
+        <div className="brand"><div className="logo">Æ</div><div><strong>AETHER</strong><span>Studio</span></div></div>
+        <nav className="views">
+          <button className={view === 'scenario' ? 'active' : ''} onClick={() => setView('scenario')}><MapIcon size={15} />Scenario</button>
+          <button className={view === 'live' ? 'active' : ''} onClick={() => setView('live')}><Radio size={15} />Live{job?.status === 'running' && <i className="pulse" />}</button>
+          <button className={view === 'results' ? 'active' : ''} onClick={() => setView('results')}><BarChart3 size={15} />Results</button>
+        </nav>
+        <div className="run-controls">
+          <label className="select-pill"><span>Scene</span>
+            <select value={state.sceneId} onChange={e => openScene(catalog, e.target.value)}>
+              {catalog.scenes.map(s => <option key={s.id} value={s.id} disabled={!!s.error}>{s.name ?? s.id}</option>)}
+            </select></label>
+          <label className="select-pill"><span>Planner</span>
+            <select value={state.agent} onChange={e => update({ agent: e.target.value })}>
+              {catalog.agents.map(a => <option key={a.id} value={a.id}>{a.title}</option>)}
+            </select></label>
+          <label className="select-pill narrow"><span>GPU</span>
+            <input value={state.cuda} onChange={e => update({ cuda: e.target.value })} /></label>
+          <button className="primary" disabled={job?.status === 'running'} onClick={run}><Play size={15} />Run</button>
         </div>
       </header>
+      {notice && <div className={`notice ${notice.kind}`} onClick={() => setNotice(null)}>{notice.text}</div>}
 
-      <aside className="left-panel">
-        <section className="panel-section scenes">
-          <div className="section-title"><Database size={14}/><span>TRAINED SCENE</span></div>
-          {catalog.scenes.map(scene => <button key={scene.id} className={`scene-card ${scene.id === detail.scene.id ? 'active' : ''}`} onClick={() => void loadScene(scene.id)}>
-            <div><strong>{scene.name.split(' · ')[0]}</strong><span>{scene.name.split(' · ')[1]}</span></div>
-            <div className="badges"><span>{scene.has_map ? 'HD MAP' : 'NO MAP'}</span>{scene.has_limsim && <span>LIMSIM</span>}</div>
-          </button>)}
-        </section>
-        <section className="panel-section actors">
-          <div className="section-title"><Box size={14}/><span>SCENE ACTORS</span><em>{experiment.actors.length}</em></div>
-          <div className="segmented compact">
-            {(['all','vehicles','people'] as const).map(value => <button className={filter === value ? 'active' : ''} onClick={() => setFilter(value)} key={value}>{value}</button>)}
+      {view === 'scenario' && <div className="workspace">
+        <aside className="left">
+          <div className="scene-card">
+            <span className="eyebrow">{scene.dataset} · {(scene.frame_dt * 1000).toFixed(0)} ms frames</span>
+            <h2>{scene.name}</h2>
+            <dl className="facts">
+              <dt>Duration</dt><dd>{scene.duration_s.toFixed(1)} s</dd>
+              <dt>Recording car</dt><dd>{scene.vehicle.name}</dd>
+              <dt>HD map</dt><dd>{scene.lanes.length ? `${scene.lanes.length} lanes` : 'none'}</dd>
+              <dt>Reconstructed</dt><dd>{plural(scene.recorded.filter(r => r.kind === 'vehicle').length, 'vehicle')} · {plural(scene.recorded.filter(r => r.kind !== 'vehicle').length, 'person', 'people')}</dd>
+            </dl>
           </div>
-          <div className="actor-list">
-            {visibleActors.map(actor => <button key={actor.id} className={`actor-row ${selectedId === actor.id ? 'active' : ''} ${actor.operation === 'remove' ? 'removed' : ''}`} onClick={() => setSelectedId(actor.id)}>
-              <span className={`actor-dot ${actor.source}`}/><div><strong>{actor.source === 'external' ? 'External vehicle' : `${actor.node_class.replace('Nodes','')} ${actor.instance_id}`}</strong><small>{actor.operation} · {actor.controller.kind}</small></div><ChevronRight size={14}/>
-            </button>)}
+          {agent && <div className="agent-card">
+            <span className="eyebrow">Planner</span>
+            <h3>{agent.title}</h3>
+            <p>{agent.description}</p>
+            <dl className="facts">
+              <dt>Cameras</dt><dd>{agent.cameras.length || 'none'}</dd>
+              <dt>LiDAR</dt><dd>{agent.lidar ? 'yes' : 'no'}</dd>
+              {agent.plan && <><dt>Plan</dt><dd>{agent.plan.frame} · {agent.plan.axes} · {agent.plan.dt}s</dd></>}
+            </dl>
+          </div>}
+          <div className="placed-list">
+            <span className="eyebrow">Placed vehicles ({state.placed.length})</span>
+            {state.placed.map(v => <button key={v.id} className={selection?.kind === 'vehicle' && selection.id === v.id ? 'active' : ''}
+              onClick={() => setSelection({ kind: 'vehicle', id: v.id })}><Car size={14} />{v.id}<em>{v.controller === 'constant' ? `${v.speed} m/s` : v.controller}</em></button>)}
+            {!state.placed.length && <p className="muted small">None — background traffic only.</p>}
           </div>
-          <button className="add-vehicle" onClick={addVehicle}><Plus size={16}/> Add 3DRealCar vehicle</button>
-        </section>
-      </aside>
-
-      <main className="workspace">
-        <div className="workspace-bar">
-          <div className="tabs"><button className={tab === 'map' ? 'active' : ''} onClick={() => setTab('map')}><MapIcon size={15}/> Road editor</button><button className={tab === 'cameras' ? 'active' : ''} onClick={() => setTab('cameras')}><Camera size={15}/> Six cameras</button></div>
-          <div className="canvas-tools"><button className={drawMode ? 'active' : ''} onClick={() => setDrawMode(!drawMode)}><Route size={15}/> Draw trajectory</button><span className="coordinate-pill">+X forward · +Y left · yaw CCW</span></div>
-        </div>
-        <div className="canvas-wrap">
-          {tab === 'map' ? <MapCanvas topology={detail.topology} actors={detail.actors} edits={experiment.actors} selectedId={selectedId} frame={frame} drawMode={drawMode} onSelect={setSelectedId} onMove={moveActor} onDrawPoint={drawPoint}/> : <CameraPanel preview={detail.preview} sceneId={detail.scene.id} onGenerate={() => void generatePreview()}/>}
-        </div>
-        <div className="timeline">
-          <Square size={11} fill="currentColor"/><span>FRAME</span><strong>{String(frame).padStart(3,'0')}</strong><input type="range" min={0} max={150} value={frame} onChange={event => setFrame(Number(event.target.value))}/><span>15.0 s</span>
-        </div>
-        <div className="statusbar"><Activity size={13}/><span>{message}</span>{job && <span className={`job-pill ${job.status}`}>JOB {job.id} · {job.status}</span>}</div>
-      </main>
-
-      <aside className="right-panel">
-        <div className="inspector-title"><Settings2 size={15}/><span>INSPECTOR</span></div>
-        {selected ? <ActorInspector actor={selected} sourceActor={sourceActor} assets={catalog.assets} controllers={catalog.controllers} hasLimsim={detail.scene.has_limsim} onChange={next => updateActor(selected.id, () => next)} onDelete={() => updateActor(selected.id, actor => ({ ...actor, operation: 'remove' }))}/> : <ExperimentInspector experiment={experiment} adapters={catalog.adapters} onChange={setExperiment}/>}
-      </aside>
-
-      {logs && <section className="run-console"><div><Code2 size={14}/><strong>RUN LOG</strong><button onClick={() => setLogs('')}>×</button></div><pre>{logs}</pre></section>}
+        </aside>
+        <main className="canvas">
+          <div className="toolbar">
+            <button className={tool === 'select' ? 'active' : ''} onClick={() => setTool('select')} title="Select / move (V)"><MousePointer2 size={16} /></button>
+            <button className={tool === 'add' ? 'active' : ''} onClick={() => setTool('add')} title="Add vehicle (A)"><Plus size={16} /><span>Add vehicle</span></button>
+            <button className={tool === 'ego' ? 'active' : ''} onClick={() => setTool('ego')} title="Place ego start"><Navigation size={16} /><span>Ego start</span></button>
+            <i className="sep" />
+            <button onClick={() => setFit(f => f + 1)} title="Fit to route"><Scan size={16} /></button>
+            <div className="layer-menu"><Layers size={16} />
+              {(['lanes', 'route', 'recorded', 'labels'] as const).map(k => (
+                <label key={k}><input type="checkbox" checked={layers[k]} onChange={e => setLayers({ ...layers, [k]: e.target.checked })} />{k}</label>))}
+            </div>
+          </div>
+          <MapEditor scene={scene} placed={state.placed} egoStart={egoPose} keep={state.keep} hideOriginals={state.hideOriginals}
+                     tool={tool} selection={selection} layers={layers} fitToken={fit}
+                     onSelect={setSelection} onAdd={addVehicle} onMoveVehicle={updateVehicle}
+                     onMoveEgo={pose => update({ egoStart: pose })} />
+          {tool !== 'select' && <div className="tool-hint"><Crosshair size={14} />{tool === 'add' ? 'Click on a lane to place a vehicle (heading follows the lane)' : 'Click to set the ego start'}</div>}
+        </main>
+        <aside className="right">
+          <Inspector state={state} scene={scene} catalog={catalog} selection={selection} egoPose={egoPose}
+                     update={update} updateVehicle={updateVehicle} replaceRecorded={replaceRecorded}
+                     removeVehicle={id => { update({ placed: state.placed.filter(v => v.id !== id) }); setSelection(null) }} />
+          <Settings state={state} catalog={catalog} sceneInfo={sceneInfo} update={update} />
+        </aside>
+      </div>}
+      {view === 'live' && <LiveView job={job} onFinished={j => { setJob(j); if (j.run) setFocusRun(j.run.split('/').pop() ?? null) }} />}
+      {view === 'results' && <Results focus={focusRun} />}
     </div>
   )
-}
-
-function ActorInspector({ actor, sourceActor, assets, controllers, hasLimsim, onChange, onDelete }: {
-  actor: ActorEdit; sourceActor: SceneDetail['actors'][number] | null; assets: Catalog['assets']; controllers: Catalog['controllers']; hasLimsim: boolean
-  onChange: (actor: ActorEdit) => void; onDelete: () => void
-}) {
-  const isRigid = actor.node_class === 'RigidNodes'
-  const operations = actor.source === 'external'
-    ? ['add', 'remove']
-    : isRigid ? ['keep','remove','edit','replace'] : ['keep','remove']
-  const setOperation = (operation: ActorEdit['operation']) => onChange({
-    ...actor, operation,
-    asset_id: operation === 'replace' ? (actor.asset_id || assets[0]?.id) : actor.asset_id,
-  })
-  const pose = actor.start || blankPose()
-  const updatePose = (key: keyof RoadPose, value: number) => onChange({ ...actor, start: { ...pose, [key]: value } })
-  return <div className="inspector-body">
-    <div className="entity-heading"><span className={`large-dot ${actor.source}`}/><div><strong>{actor.source === 'external' ? 'External vehicle' : actor.id}</strong><small>{actor.node_class} · {sourceActor ? `frames ${sourceActor.first_frame}–${sourceActor.last_frame}` : 'new asset'}</small></div></div>
-    <label className="field"><span>ACTION</span><select value={actor.operation} onChange={event => setOperation(event.target.value as ActorEdit['operation'])}>{operations.map(value => <option key={value}>{value}</option>)}</select></label>
-    {(actor.operation === 'replace' || actor.source === 'external') && <label className="field"><span>VEHICLE ASSET</span><select value={actor.asset_id || ''} onChange={event => onChange({ ...actor, asset_id: event.target.value })}>{assets.filter(asset => asset.available).map(asset => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select><small>Source: 3DRealCar</small></label>}
-    {actor.operation !== 'remove' && <>
-      <label className="field"><span>CONTROLLER</span><select value={actor.controller.kind} onChange={event => {
-        const kind = event.target.value as ActorEdit['controller']['kind']
-        let trajectory = actor.controller.trajectory
-        if (kind === 'open_loop' && trajectory.length < 2) trajectory = [{ ...pose, t: 0 }, { ...pose, x: pose.x + 10, t: 5 }]
-        const plugin = kind === 'plugin' ? (actor.controller.plugin || controllers.find(value => value.kind === 'plugin')?.id || null) : actor.controller.plugin
-        onChange({ ...actor, operation: actor.source === 'external' ? 'add' : actor.operation === 'keep' ? 'edit' : actor.operation, controller: { ...actor.controller, kind, trajectory, plugin } })
-      }}><option value="recorded" disabled={actor.source === 'external'}>Recorded trajectory</option><option value="open_loop">Open-loop trajectory</option><option value="limsim" disabled={!hasLimsim || actor.source !== 'external'}>LimSim</option><option value="plugin">Python plugin</option></select></label>
-      {actor.controller.kind === 'plugin' && <label className="field"><span>REGISTERED PLUGIN</span><select value={actor.controller.plugin || ''} onChange={event => onChange({ ...actor, controller: { ...actor.controller, plugin: event.target.value } })}><option value="" disabled>Select plugin</option>{controllers.filter(value => value.kind === 'plugin').map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select>{!controllers.some(value => value.kind === 'plugin') && <small>Register a plugin in configs/studio/catalog.yaml.</small>}</label>}
-      <div className="field"><span>START POSE · ROAD FRAME</span><div className="number-grid">{(['x','y','yaw'] as const).map(key => <label key={key}><em>{key === 'yaw' ? 'yaw°' : `${key} m`}</em><input type="number" step={key === 'yaw' ? 1 : .25} value={key === 'yaw' ? pose.yaw * 180 / Math.PI : pose[key]} onChange={event => updatePose(key, key === 'yaw' ? Number(event.target.value) * Math.PI / 180 : Number(event.target.value))}/></label>)}</div></div>
-      {actor.controller.kind === 'open_loop' && <div className="trajectory-summary"><Route size={15}/><div><strong>{actor.controller.trajectory.length} waypoints</strong><small>Use “Draw trajectory” and click the road map.</small></div><button onClick={() => onChange({ ...actor, controller: { ...actor.controller, trajectory: [] } })}>Clear</button></div>}
-    </>}
-    <button className="danger" onClick={onDelete}><Trash2 size={15}/> Remove from scene</button>
-  </div>
-}
-
-function ExperimentInspector({ experiment, adapters, onChange }: { experiment: Experiment; adapters: Catalog['adapters']; onChange: (value: Experiment) => void }) {
-  const ego = experiment.ego
-  const updateEgo = (key: keyof RoadPose, value: number) => onChange({ ...experiment, ego: { ...ego, start: { ...ego.start, [key]: value } } })
-  return <div className="inspector-body">
-    <div className="subhead">EGO & ALGORITHM</div>
-    <label className="field"><span>E2E ADAPTER</span><select value={experiment.algorithm.adapter} onChange={event => onChange({ ...experiment, algorithm: { ...experiment.algorithm, adapter: event.target.value } })}>{adapters.map(adapter => <option key={adapter.id} value={adapter.id}>{adapter.name}</option>)}</select></label>
-    <div className="field"><span>EGO START · ROAD FRAME</span><div className="number-grid">{(['x','y','yaw'] as const).map(key => <label key={key}><em>{key === 'yaw' ? 'yaw°' : `${key} m`}</em><input type="number" value={key === 'yaw' ? ego.start.yaw * 180 / Math.PI : ego.start[key]} onChange={event => updateEgo(key, key === 'yaw' ? Number(event.target.value) * Math.PI / 180 : Number(event.target.value))}/></label>)}</div></div>
-    <label className="field"><span>START SPEED · M/S</span><input type="number" min="0" step=".5" value={ego.speed} onChange={event => onChange({ ...experiment, ego: { ...ego, speed: Number(event.target.value) } })}/></label>
-    <div className="subhead">RUNTIME</div>
-    <label className="field"><span>MAX STEPS</span><input type="number" min="1" value={experiment.runtime.max_steps} onChange={event => onChange({ ...experiment, runtime: { ...experiment.runtime, max_steps: Number(event.target.value) } })}/></label>
-    <label className="toggle-row"><div><strong>Difix camera repair</strong><small>Applied to all six inputs before E2E inference.</small></div><input type="checkbox" checked={experiment.runtime.difix.enabled} onChange={event => onChange({ ...experiment, runtime: { ...experiment.runtime, difix: { ...experiment.runtime.difix, enabled: event.target.checked } } })}/></label>
-    <label className="field"><span>DIFIX MAX SIDE</span><select value={experiment.runtime.difix.max_side} onChange={event => onChange({ ...experiment, runtime: { ...experiment.runtime, difix: { ...experiment.runtime.difix, max_side: Number(event.target.value) } } })}><option>512</option><option>768</option><option>1024</option></select></label>
-    <div className="coordinate-card"><Route size={17}/><div><strong>Canonical road frame</strong><small>+x forward · +y left · +yaw counter-clockwise</small></div></div>
-  </div>
 }

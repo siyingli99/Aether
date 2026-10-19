@@ -1,8 +1,7 @@
-"""AETHER — Autonomous Evaluation Testbed with High-fidelity Embodied Renderer.
+"""AETHER — closed-loop driving simulation on reconstructed 3D Gaussian scenes.
 
-A closed-loop driving simulator that wraps DriveStudio's native rendering stack
-behind a HUGSIM-compatible AD-agent IPC interface.
+Editable Gaussian scenes, 2D traffic simulators and end-to-end driving models
+in one camera closed loop.  Importing the package is side-effect free; heavy
+back-ends are loaded by the modules that need them.
 """
-from . import paths  # noqa: F401  (side-effect: extends sys.path)
-
-__version__ = "0.1.0"
+__version__ = "0.2.0"

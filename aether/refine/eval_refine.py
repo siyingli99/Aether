@@ -13,7 +13,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 import matplotlib
 matplotlib.use("Agg")
@@ -22,6 +21,8 @@ import matplotlib.pyplot as plt
 import sys
 from aether.paths import AETHER_ROOT
 sys.path.insert(0, str(AETHER_ROOT))
+from aether.paths import use_vendored_backends
+use_vendored_backends()  # DriveStudio / SplatAD on sys.path
 from aether.refine.train_lidar_refiner import LidarRefiner
 
 _AETHER = AETHER_ROOT
@@ -64,7 +65,7 @@ def main():
 
     rc = torch.load(refiner_ckpt, map_location=device, weights_only=False)
     model = LidarRefiner().to(device); model.load_state_dict(rc["model"]); model.eval()
-    hw = tuple(rc.get("hw", (64, 1024)))
+    _hw = tuple(rc.get("hw", (64, 1024)))
     far = float(rc.get("far", args.far))
 
     agg = {"raw": [], "refined": []}
