@@ -11,7 +11,8 @@ Run directory (``outputs/runs/<scene>-<agent>-<YYYYmmdd-HHMMSS>/``)::
     videos/bev.mp4            smooth bird's-eye view (20 fps, interpolated)
     videos/overview.mp4       BEV | cameras side by side, same clock
     agent/                    planner work dir (FIFOs, planner.log, its own outputs)
-    logs/steps.jsonl          per-step timing and controls
+    logs/steps.jsonl          per-step timing, controls, route command and the
+                              tracked plan (rear-axle frame)
     logs/io/, render_poses.json   only with ``output.io_trace``: agent inputs
                               and scene-frame render poses per step
 
@@ -286,8 +287,11 @@ def run_episode(scenario: Scenario, agent: str | EgoAgent | None = None,
             if action is None:
                 terminated_by = "agent_stopped"
                 break
+            plan_log = None
             if isinstance(action, Plan):
                 origin = plan_origin(env, action.frame)
+                from ..agents.tracker import rear_axle_reference
+                plan_log = np.round(rear_axle_reference(action, origin)[1:, :2], 3).tolist()
                 accel, steer_rate = tracker.control(action, env.state.v, env.state.steer, origin)
                 if videos:
                     videos.plan_world = _plan_to_world(action, env, origin)
@@ -311,7 +315,9 @@ def run_episode(scenario: Scenario, agent: str | EgoAgent | None = None,
                                         "accel": accel, "steer_rate": steer_rate,
                                         "render_s": round(t_render, 4), "refine_s": round(t_refine, 4),
                                         "agent_s": round(t_agent, 4),
-                                        "step_s": round(t_step, 4),
+                                        "step_s": round(t_step, 4), "command": info.get("command"),
+                                        "steer": round(env.state.steer, 4),
+                                        "plan_rear_axle": plan_log,
                                         "events": [e["type"] for e in info["events"]]}) + "\n")
             steps_log.flush()
             if verbose:

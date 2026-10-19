@@ -8,8 +8,8 @@ Two trackers (``sim.tracker``):
 
 * ``pure_pursuit`` (default) – decoupled control as in production AV stacks:
   the longitudinal loop tracks the plan's speed profile, the lateral loop
-  picks the steering arc that best overlays the plan's *path* over the next
-  1.5 s of travel (arc-length matched preview, a pure-pursuit variant).  The ego can only
+  picks the steering arc that best overlays the plan's *path* at the points
+  the plan reaches every 0.5 s over its horizon (up to 3 s) (arc-length matched preview, a pure-pursuit variant).  The ego can only
   turn the way the path turns, also when the planner asks for more
   deceleration than the vehicle can deliver.
 * ``ilqr`` – the nuPlan iLQR solver on the time-indexed waypoints.  When a
@@ -121,8 +121,7 @@ class TrajectoryTracker:
         accel = (v_target - speed) / max(horizon, self.dt)
         accel = min(max(accel, -p.max_decel), p.max_accel)
         # Lateral: arc-length matched preview.  Choose the constant steering
-        # angle whose arc best overlays the plan's *path* at 0.5/1.0/1.5 s of
-        # travel at the current speed.  The path is compared at equal arc
+        # angle whose arc best overlays the plan's *path* over its horizon.  The path is compared at equal arc
         # length (not equal time), so a plan that asks for a different speed
         # never turns into a lateral error, and curvature ahead is anticipated.
         s = np.concatenate([[0.0], np.cumsum(seg)])
@@ -135,9 +134,18 @@ class TrajectoryTracker:
             beyond = np.maximum(arc - s[-1], 0.0)[:, None]
             return inside + beyond * np.array([math.cos(heading_end), math.sin(heading_end)])
 
-        preview = max(speed, 2.0) * np.array([0.5, 1.0, 1.5])
+        # Preview points: where the *plan* expects the vehicle every 0.5 s over
+        # its whole horizon (up to 3 s), but at least as far as the current
+        # speed carries the vehicle, so a slow-down plan still steers on the
+        # path ahead of the car.  Using the whole horizon matters: planners
+        # such as UniAD keep the first second of a turn almost straight in
+        # every re-plan, so a short preview would never start the turn.
+        horizon_t = max(float(len(s) - 1) * plan.dt, 0.5)
+        times = np.arange(0.5, min(horizon_t, 3.0) + 1e-6, 0.5)
+        plan_arc = np.interp(times, np.arange(len(s)) * plan.dt, s)
+        preview = np.maximum(np.maximum(plan_arc, 0.6 * max(speed, 0.0) * times), 1.0 * times)
         target = path_at(preview)
-        weights = np.array([1.0, 1.0, 0.5])
+        weights = np.clip(1.2 - 0.2 * times, 0.5, 1.0)
         limit = p.max_steer
         if speed > 1e-3:
             limit = min(limit, math.atan(p.max_lat_accel * p.wheelbase / (speed * speed)))

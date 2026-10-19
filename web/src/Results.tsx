@@ -65,9 +65,9 @@ export default function Results({ focus }: { focus?: string | null }) {
           </section>
           <section>
             <h3>Data</h3>
-            <ul className="files">{detail.files.filter(f => /\.(csv|json)$/.test(f)).map(f => (
+            <ul className="files">{detail.files.filter(f => /^[^/]+\.(csv|json|xml)$/.test(f) || /^agent\/[^/]+\/video\.mp4$/.test(f)).map(f => (
               <li key={f}><a href={`${detail.base_url}/${f}`} download><FileDown size={14} />{f}</a></li>))}</ul>
-            <p className="muted small">trajectories*.csv: every vehicle, every step — x, y, yaw, speed, acceleration, lane, s/d, global map coordinates.</p>
+            <p className="muted small">trajectories*.csv: every vehicle, every step — x, y, yaw, speed, acceleration, lane, s/d, global map coordinates. trajectories_fcd.xml: the same in SUMO FCD format. agent/…/video.mp4: the planner's own visualisation (UniAD).</p>
           </section>
         </div>
       </main>}
