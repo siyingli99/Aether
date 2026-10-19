@@ -11,6 +11,7 @@ export interface EditorState {
   dt: number
   maxSteps: number
   seed: number
+  tracker: 'pure_pursuit' | 'ilqr'
   vehicle: string                 // 'auto' or a profile name
   speedMode: 'logged' | 'fixed'
   speed: number
@@ -47,6 +48,7 @@ export function initialState(catalog: Catalog, scene: SceneDetail | null, sceneI
   return {
     sceneId, name: '', agent: 'replay', cuda: '0',
     dt: d.sim.dt, maxSteps: d.sim.max_steps, seed: d.sim.seed,
+    tracker: d.sim.tracker ?? 'pure_pursuit',
     vehicle: 'auto', speedMode: 'logged', speed: 5, egoStart: null,
     traffic: scene && catalog.scenes.find(s => s.id === sceneId)?.has_network ? 'limsim' : (scene?.lanes.length ? 'idm' : 'none'),
     maxVehicles: 3, idmCount: 3, idmSpeed: 8, limsimPort: 8766,
@@ -84,7 +86,7 @@ export function toScenario(s: EditorState): Scenario {
   const needsAssets = model !== null || s.placed.some(v => !v.replaces)
   return {
     scene: s.sceneId, name: s.name || null,
-    sim: { dt: s.dt, max_steps: s.maxSteps, seed: s.seed },
+    sim: { dt: s.dt, max_steps: s.maxSteps, seed: s.seed, tracker: s.tracker },
     ego: { vehicle: s.vehicle, start: s.egoStart ?? 'logged', speed: s.speedMode === 'logged' ? 'logged' : s.speed, allow_reverse: false },
     traffic: { hide_originals: s.hideOriginals, keep: s.keep, assets: needsAssets ? s.assets : [],
                max_vehicles: s.maxVehicles, model, vehicles },

@@ -149,7 +149,29 @@ def get_bev_img(outputs, save_fn):
     
     # return img_base64
 
-def save_visualize_img(outputs, visual_imgs, save_fn):
+def metas_from_cam_params(cam_params, cameras, scale=2.0):
+    """Visualisation metas from AETHER's per-step camera parameters.
+
+    The lidar frame is used as the 'ego' frame, so ``lidar_cs_record`` is the
+    identity and each camera record is its camera-to-lidar transform.  This
+    replaces the fixed nuScenes calibration (``nus_vis_pose_info.pkl``) so the
+    overlays match whatever rig the scene has (nuScenes, PandaSet, nuPlan).
+    """
+    metas = {'lidar_cs_record': {'rotation': [1.0, 0.0, 0.0, 0.0], 'translation': [0.0, 0.0, 0.0]}}
+    for cam in cameras:
+        params = cam_params[cam]
+        c2l = np.linalg.inv(np.asarray(params['l2c'], dtype=np.float64))
+        q = Quaternion(matrix=c2l[:3, :3], atol=1e-5)
+        K = get_intrinsic(params['intrinsic']).astype(np.float64)[:3, :3].copy()
+        K[:2] *= scale
+        W = int(round(params['intrinsic']['W'] * scale))
+        H = int(round(params['intrinsic']['H'] * scale))
+        metas[cam] = {'cs_record': {'rotation': list(q.elements), 'translation': c2l[:3, 3].tolist()},
+                      'cam_intrinsic': K, 'imsize': (W, H)}
+    return metas
+
+
+def save_visualize_img(outputs, visual_imgs, save_fn, cam_params=None):
     #visiualize
     render_cfg = dict(
         with_occ_map=False,
@@ -173,7 +195,10 @@ def save_visualize_img(outputs, visual_imgs, save_fn):
 
     viser = Visualizer(**render_cfg)
     prediction_dict = viser._parse_predictions(outputs)
-    metas = mmcv.load(_VIS_META)
+    if cam_params is not None:
+        metas = metas_from_cam_params(cam_params, CAM_NAMES)
+    else:
+        metas = mmcv.load(_VIS_META)
     # breakpoint()
 
     image_dict = {} # TODO: surrounding images

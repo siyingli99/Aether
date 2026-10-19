@@ -7,8 +7,10 @@ description: >-
 command: [bash, "${AETHER_ROOT}/third_party/uniad_sim/tools/e2e.sh", "${cuda}", "${workdir}"]
 env:
   PYTHONUNBUFFERED: "1"
-  # Per-step UniAD visualisation (needs data_temp/nus_vis_pose_info.pkl from UniAD_SIM).
-  UNIAD_VIS: "0"
+  # UniAD's own per-step visualisation (predicted boxes, motion forecasts and
+  # plan, BEV + six cameras) -> <run>/agent/uniad/NNNN_combine.jpg and video.mp4.
+  # Uses the scene's actual rig; set "0" to save CPU time.
+  UNIAD_VIS: "1"
 ready: ["ready for"]
 protocol: tuple
 input:

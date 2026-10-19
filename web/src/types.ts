@@ -42,7 +42,7 @@ export interface PlacedVehicle {
 
 export interface Scenario {
   scene: string; name?: string | null
-  sim: { dt: number; max_steps: number; seed: number }
+  sim: { dt: number; max_steps: number; seed: number; tracker?: 'pure_pursuit' | 'ilqr' }
   ego: { vehicle: string; start: 'logged' | { x: number; y: number; yaw: number }; speed: 'logged' | number; allow_reverse: boolean }
   traffic: { hide_originals: boolean; keep: string[]; assets: string[]; max_vehicles: number; model: Record<string, unknown> | null; vehicles: Record<string, unknown>[] }
   refine: { enabled: boolean; required: boolean; model: string; max_side: number; timestep: number; dtype: string; cuda: string | null }

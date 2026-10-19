@@ -14,7 +14,18 @@ surface is estimated once per scene from two complementary sources:
 The corridor profile is shifted by the median splat-minus-profile offset,
 cells within ``corridor`` metres of the route use the profile, cells further
 away blend towards their splat estimate, which is only allowed to deviate
-from the corridor level by a slope-limited margin.  The result is a 0.5 m
+from the corridor level by a slope-limited margin (3 %, at most 0.6 m): far
+from the driven corridor the reconstruction often has no road splats at all
+(only foliage or building bases), and a wrong surface there makes traffic
+vehicles pitch wildly.
+
+Road surfaces are smooth, but single cells are not: kerbs, planting strips,
+low vegetation and parked-car undersides lift the dense layer locally.  Cell
+estimates are therefore (a) restricted to the HD-map drivable area when the
+scene has one and (b) replaced by a robust local plane fit over a
+``SMOOTH_RADIUS`` neighbourhood, dropping cells that stick out by more than
+``OUTLIER`` metres.  Vehicles placed off the logged corridor (traffic, an
+ego that leaves the recorded path) then ride on a surface without bumps.  The result is a 0.5 m
 height field queried with bilinear interpolation, cached in
 ``<scene>/cache/ground.npz``.
 """
@@ -30,7 +41,12 @@ CELL = 2.0           # splat statistics cell (m)
 RESOLUTION = 0.5     # output height-field resolution (m)
 CORRIDOR = 4.0       # distance (m) within which the logged profile is used
 BLEND = 8.0          # distance (m) over which splat estimates take over
-MAX_SLOPE = 0.08     # tolerated deviation slope off the corridor (8 %)
+MAX_SLOPE = 0.03     # tolerated deviation slope off the corridor (3 %)
+MAX_DEVIATION = 0.6  # m, cap on the deviation from the corridor level
+SMOOTH_RADIUS = 12.0 # m, neighbourhood of the robust local plane fit
+OUTLIER = 0.15       # m, cells further from the local plane are discarded
+MAX_GRADE = 0.10     # steepest grade / cross-fall a vehicle is placed on
+VERSION = 6          # bump to invalidate cached ground models
 
 
 def ground_layer(heights: np.ndarray, window: float = 0.25, min_share: float = 0.5) -> float:
@@ -62,6 +78,38 @@ def _cell_ground(points: np.ndarray, min_points: int = 8):
     return (keys[dense] + 0.5) * CELL, ground[dense]
 
 
+def _smooth_cells(centers: np.ndarray, z: np.ndarray, radius: float = SMOOTH_RADIUS,
+                  outlier: float = OUTLIER, iterations: int = 4) -> np.ndarray:
+    """Robust local plane fit through the *lower envelope* of cell heights.
+
+    Off the driven corridor many cells hold no road splats at all, only tree
+    canopies or building bases several metres up.  The fit starts from a low
+    neighbourhood quantile and keeps only cells within ``outlier`` above (and
+    0.5 m below) the current surface, so it settles on the road layer and
+    ignores kerbs, vegetation and canopies.
+    """
+    from scipy.spatial import cKDTree
+    if len(centers) < 4:
+        return z.copy()
+    tree = cKDTree(centers)
+    neighbours = [np.asarray(n) for n in tree.query_ball_point(centers, radius)]
+    fitted = np.array([np.quantile(z[n], 0.2) for n in neighbours])
+    for _ in range(iterations):
+        keep = (z - fitted <= outlier) & (z - fitted >= -0.5)
+        new = fitted.copy()
+        for i, idx in enumerate(neighbours):
+            sel = idx[keep[idx]]
+            if len(sel) < 4:
+                continue
+            d = centers[sel] - centers[i]
+            w = np.exp(-0.5 * (np.hypot(d[:, 0], d[:, 1]) / (0.5 * radius)) ** 2)
+            A = np.column_stack([np.ones(len(sel)), d]) * w[:, None]
+            coef = np.linalg.lstsq(A, z[sel] * w, rcond=None)[0]
+            new[i] = coef[0]
+        fitted = new
+    return fitted
+
+
 @dataclass
 class GroundModel:
     origin: np.ndarray        # (2,) road-frame xy of grid cell (0, 0)
@@ -70,14 +118,21 @@ class GroundModel:
 
     # ------------------------------------------------------------- build
     @classmethod
-    def build(cls, splats: np.ndarray, route: np.ndarray,
-              margin: float = 20.0) -> "GroundModel":
+    def build(cls, splats: np.ndarray, route: np.ndarray, margin: float = 20.0,
+              drivable=None) -> "GroundModel":
         """``splats``: (N, 3) road-frame points; ``route``: (T, 3) logged
-        rear-axle ground points (x, y, z) in the road frame."""
+        rear-axle ground points (x, y, z) in the road frame; ``drivable``:
+        optional ``fn((M, 2) xy) -> bool mask`` of the HD-map drivable area."""
         from scipy.ndimage import uniform_filter
         from scipy.spatial import cKDTree
 
         centers, cell_z = _cell_ground(np.asarray(splats, dtype=np.float64))
+        if drivable is not None and len(centers):
+            road = np.asarray(drivable(centers), dtype=bool)
+            if road.sum() >= 8:
+                centers, cell_z = centers[road], cell_z[road]
+        if len(centers):
+            cell_z = _smooth_cells(centers, cell_z)
         route = np.asarray(route, dtype=np.float64)
         route_tree = cKDTree(route[:, :2])
         offset = 0.0
@@ -100,12 +155,15 @@ class GroundModel:
             cell_tree = cKDTree(centers)
             d_cell, i_cell = cell_tree.query(grid)
             splat_z = cell_z[i_cell]
-            allowed = 0.3 + MAX_SLOPE * np.maximum(d_route - CORRIDOR, 0.0)
-            splat_z = np.clip(splat_z, corridor_z - allowed, corridor_z + allowed)
+            allowed = np.minimum(0.3 + MAX_SLOPE * np.maximum(d_route - CORRIDOR, 0.0), MAX_DEVIATION)
             weight = np.clip((d_route - CORRIDOR) / BLEND, 0.0, 1.0)
             weight[d_cell > 2.0 * CELL] = 0.0      # no splat support nearby
+            # Estimates outside the plausible band are not road (canopies,
+            # building bases, floaters): fall back to the corridor level
+            # instead of clipping them to the band edge.
+            weight[np.abs(splat_z - corridor_z) > allowed] = 0.0
             fused = (1.0 - weight) * corridor_z + weight * splat_z
-        heights = uniform_filter(fused.reshape(ny, nx), size=3, mode="nearest")
+        heights = uniform_filter(fused.reshape(ny, nx), size=7, mode="nearest")   # 3.5 m box
         return cls(lo.astype(np.float64), RESOLUTION, heights)
 
     # ------------------------------------------------------------ caching
@@ -149,6 +207,7 @@ class GroundModel:
         z = self.height(wx, wy)
         rear, front = 0.5 * (z[0] + z[1]), 0.5 * (z[2] + z[3])
         left, right = 0.5 * (z[0] + z[2]), 0.5 * (z[1] + z[3])
-        pitch = -math.atan2(front - rear, wheelbase)
-        roll = math.atan2(left - right, track)
+        limit = math.atan(MAX_GRADE)
+        pitch = min(max(-math.atan2(front - rear, wheelbase), -limit), limit)
+        roll = min(max(math.atan2(left - right, track), -limit), limit)
         return float(rear), pitch, roll

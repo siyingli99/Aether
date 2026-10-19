@@ -31,6 +31,7 @@ class SimConfig(_Strict):
     dt: float = Field(0.25, gt=0)            # closed-loop step (s)
     max_steps: int = Field(40, ge=1)
     seed: int = 0
+    tracker: Literal["pure_pursuit", "ilqr"] = "pure_pursuit"   # waypoint follower
 
 
 class StartPose(_Strict):

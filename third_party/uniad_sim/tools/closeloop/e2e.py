@@ -62,9 +62,9 @@ def _to_cpu(value):
     return value
 
 
-def _safe_visualize(outputs, raw_images, save_fn):
+def _safe_visualize(outputs, raw_images, save_fn, cam_params=None):
     try:
-        save_visualize_img(outputs, raw_images, save_fn)
+        save_visualize_img(outputs, raw_images, save_fn, cam_params)
     except Exception as error:  # visualization must never break the loop
         print(f'[uniad-vis] {save_fn}: {type(error).__name__}: {error}', flush=True)
 
@@ -325,7 +325,8 @@ def main():
             while len([p for p in vis_process_pool if p.is_alive()]) >= MAX_VIS_WORKERS:
                 time.sleep(0.05)
             process = multiprocessing.Process(target=_safe_visualize,
-                                              args=(vis, raw_images, save_fn))
+                                              args=(vis, raw_images, save_fn,
+                                                    raw_data[1].get('cam_params')))
             vis_process_pool.append(process)
             process.start()
 

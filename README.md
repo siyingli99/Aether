@@ -8,7 +8,7 @@ AETHER is a closed-loop simulator for autonomous driving built on reconstructed 
           ┌────────────── planner (UniAD / VAD / LTF / VLA / yours) ─────────────┐
  images ──┤                                                                       ├── waypoints
           └───────────────────────────────────────────────────────────────────────┘
-   ▲                                                                                │ iLQR tracking
+   ▲                                                                                │ waypoint tracking
    │ render (Gaussians + traffic assets)          ego kinematics (bicycle model)   ▼
  3D scene ◄──── vehicle poses ◄──── traffic model (LimSim / IDM / yours) ◄──── ego state
    │
@@ -96,7 +96,7 @@ Every run writes one directory, `outputs/runs/<scene>-<agent>-<YYYYmmdd-HHMMSS>/
 | `videos/overview.mp4` | BEV and cameras side by side |
 | `run.json` | scenario, agent, vehicle model, timing, LiDAR source |
 | `logs/steps.jsonl` | per-step control, timing and events |
-| `agent/` | planner work directory: `planner.log`, FIFOs and anything the planner saves |
+| `agent/` | planner work directory: `planner.log`, FIFOs and anything the planner saves (UniAD: `agent/uniad/video.mp4`, its own detection/forecast/plan view) |
 | `logs/io/`, `logs/render_poses.json` | only with `output.io_trace: true`: the images the planner received at each step and the render poses, for debugging adapters and for closed-loop distillation (`aether/refine/distill_from_closed_loop.py`) |
 
 All three videos share one clock: second *t* of every video shows simulation time *t*. The camera video plays one frame per simulation step (4 fps at `dt = 0.25 s`). The BEV interpolates vehicle motion between steps with cubic Hermite splines on position and velocity, so it plays smoothly.
@@ -130,7 +130,7 @@ The planner is called once per simulation step (`sim.dt`, 0.25 s by default):
 | command | `0` right, `1` left, `2` straight, from the recorded route 3 s ahead |
 | LiDAR (optional) | `float32 [N, 4]` (x, y, z, intensity) in the rig's LIDAR_TOP frame; SplatAD sweep if a sidecar exists, else depth back-projection |
 
-It returns **waypoints** (`Plan`): `N × 2` positions at `dt` (default 0.5 s) intervals, the first one at `+dt`, in a declared frame. Alternatively it returns a direct **control** (`Control`: acceleration in m/s², steering rate in rad/s, left positive). AETHER converts waypoints to the rear axle of the ego vehicle and tracks them with an iLQR controller that uses the ego's wheelbase and acceleration and steering limits. The ego then moves with a kinematic bicycle model; its steering angle is capped by the tyre-friction limit `v² tan(δ) / L ≤ max_lat_accel` (default 8 m/s², set per vehicle in `configs/vehicles/`), so a planner cannot corner faster than a real car.
+It returns **waypoints** (`Plan`): `N × 2` positions at `dt` (default 0.5 s) intervals, the first one at `+dt`, in a declared frame. Alternatively it returns a direct **control** (`Control`: acceleration in m/s², steering rate in rad/s, left positive). AETHER converts waypoints to the rear axle of the ego vehicle and tracks them with the ego's own wheelbase and acceleration/steering limits. The default tracker (`sim.tracker: pure_pursuit`) is decoupled like a production AV controller: the speed loop follows the plan's speed one second ahead, the steering loop pursues a look-ahead point on the plan's path, so the ego always turns the way the path turns, even when the planner asks for more braking than the car can deliver. `sim.tracker: ilqr` selects the nuPlan iLQR solver used in v0.1; on infeasible plans (e.g. a stop requested at 60 km/h) it can swerve to the opposite side. The ego then moves with a kinematic bicycle model; its steering angle is capped by the tyre-friction limit `v² tan(δ) / L ≤ max_lat_accel` (default 8 m/s², set per vehicle in `configs/vehicles/`), so a planner cannot corner faster than a real car.
 
 | `frame` | Waypoints are relative to | Typical planner |
 |---|---|---|
@@ -357,7 +357,7 @@ Vehicles and a traffic model can be combined. Add `render: {original: RigidNodes
 ```yaml
 # configs/scenarios/nuscenes-0383.yaml
 scene: nuscenes-0383                 # bundle in data/scenes/
-sim: {dt: 0.25, max_steps: 39, seed: 0}
+sim: {dt: 0.25, max_steps: 39, seed: 0, tracker: pure_pursuit}   # or ilqr
 ego:
   vehicle: auto                      # vehicle profile; auto = the recording car of the dataset
   start: logged                      # or {x, y, yaw} (box centre, road frame)
@@ -404,7 +404,24 @@ PandaSet scenes use x right, y forward, z up in the scene frame (the PandaSet eg
 
 ### Ground
 
-The reconstruction does not contain a separate ground model. AETHER estimates the ground surface once per scene (cached in `data/scenes/<id>/cache/ground.npz`) from two sources. The recorded ego trajectory gives the road profile along the route. The background Gaussians give the absolute level elsewhere: for each 2 m cell, the lowest dense layer of splats is taken as the ground, which rejects floaters below the road and objects above it. The two are blended with a slope limit and smoothed onto a 0.5 m grid. The ego and every traffic vehicle rest on this surface: their height, pitch and roll come from the ground under their wheels and axles. Cameras therefore follow slopes and kerbs, and parked or moving vehicles do not float or sink.
+The reconstruction does not contain a separate ground model. AETHER estimates the ground surface once per scene (cached in `data/scenes/<id>/cache/ground.npz`) from two sources. The recorded ego trajectory gives the road profile along the route. The background Gaussians give the absolute level elsewhere: for each 2 m cell, the lowest dense layer of splats is taken as the ground, which rejects floaters below the road and objects above it. Away from the route the splat estimate is trusted only where it is plausible road: cells are restricted to the HD-map drivable area, a robust local plane is fitted through the *lower envelope* of the cells (kerbs, planting strips and tree canopies are rejected), and estimates more than 3 % × distance (at most 0.6 m) from the route level fall back to the route level. The result is smoothed onto a 0.5 m grid. The ego and every traffic vehicle rest on this surface: height, pitch and roll come from the ground under their wheels, limited to a 10 % grade, and traffic vehicles settle with a 0.4 s time constant like a suspension. Cameras therefore follow slopes, and vehicles do not float, sink or pitch on reconstruction noise.
+
+### Dataset specifics
+
+Each dataset has its own conventions; the importer and the scene frame absorb them so that scenarios, planners and outputs see the same road / vehicle frames.
+
+| | nuScenes | PandaSet | nuPlan |
+|---|---|---|---|
+| scene frame (DriveStudio) | first CAM_FRONT, x right, y down, z forward | first ego pose, x right, y forward, z up | first ego pose, x forward, y left, z up |
+| scene anchor | CAM_FRONT | ego pose (box centre) | ego pose (rear axle) |
+| ego vehicle (`vehicle: auto`) | Renault Zoe | Chrysler Pacifica | sedan |
+| frame rate | 10 Hz (`processed_10Hz`; 2 Hz keyframe scenes: `frame_dt` 0.5) | 10 Hz | 10 Hz |
+| cameras → nuScenes names | native 6 cameras | front, front_left/right, left/right (90° side cameras), back | F0, L0, R0, L1, R1, B0 (`--rig-mounts`: nuScenes-like virtual rig) |
+| extrinsics | per frame | per frame | static, camera-to-ego |
+| HD map | nuScenes map expansion (lanes + drivable area) | none (off-road check disabled) | GeoPackage lanes with outlines |
+| logged start speed | low urban speeds | often 10–17 m/s | varies |
+
+Planners trained on nuScenes (UniAD, VAD) see a different camera layout and intrinsics on PandaSet and nuPlan; their adapters project with the scene's real calibration, but expect out-of-domain behaviour. PandaSet scenes often start at highway speed: a nuScenes-trained planner may brake hard there, which the speed loop executes within the vehicle's braking limit while steering keeps following the planned path.
 
 ### Collisions and violations
 
@@ -471,7 +488,7 @@ LiDAR research tools (point-cloud sidecar training, refiners) are in `aether/tra
 
 ## Reproducing results from before v0.2
 
-The paper's numbers were produced with the v0.1 pipeline. v0.2 changes the simulation: the background-collision box rests on the local ground instead of floating at camera height, and a terrain-following ground model replaces the single ground plane. Recorded actors advance at the dataset frame rate, and the drivable area comes from real HD-map polygons. The ego starts at its recorded speed, waypoints are interpreted in the planner's declared frame, and the iLQR tracker uses the ego vehicle's own parameters without a wall-clock limit. These changes alter the metrics. To reproduce the published numbers, use the `v0.1` tag (the last commit of the v0.1 pipeline) and the README of that version.
+The paper's numbers were produced with the v0.1 pipeline. v0.2 changes the simulation: the background-collision box rests on the local ground instead of floating at camera height, and a terrain-following ground model replaces the single ground plane. Recorded actors advance at the dataset frame rate, and the drivable area comes from real HD-map polygons. The ego starts at its recorded speed, waypoints are interpreted in the planner's declared frame, and waypoints are tracked by a decoupled pure-pursuit/speed controller with the ego vehicle's own parameters (v0.1: iLQR with a 50 ms wall-clock limit, which made the ego weave). These changes alter the metrics. To reproduce the published numbers, use the `v0.1` tag (the last commit of the v0.1 pipeline) and the README of that version.
 
 The second demo scene was called `nuscenes-0088` before; it is nuScenes trainval index 88, which is **scene-0106**, and is now `nuscenes-0106`. `python -m aether migrate` renames an existing bundle, and the old id still loads.
 

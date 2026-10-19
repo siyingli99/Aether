@@ -6,6 +6,22 @@ from pyquaternion import Quaternion
 from nuscenes.prediction import PredictHelper, convert_local_coords_to_global
 from tools.analysis_tools.visualize.render.base_render import BaseRender
 from tools.analysis_tools.visualize.utils import color_mapping, AgentPredictionData
+import os
+
+# UniAD ships its icons in <UniAD root>/sources; resolve them from this file
+# (the process working directory differs between launchers).
+_SOURCES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), *(['..'] * 4), 'sources'),
+            os.environ.get('UNIAD_SOURCES', ''), 'sources']
+
+
+def _source_image(name):
+    for root in _SOURCES:
+        path = os.path.join(root, name) if root else ''
+        if path and os.path.isfile(path):
+            image = cv2.imread(path)
+            if image is not None:
+                return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    return None
 
 
 class BEVRender(BaseRender):
@@ -254,11 +270,14 @@ class BEVRender(BaseRender):
         self.axes.text(-48, -45, command_dict[int(command)], fontsize=45)
 
     def render_sdc_car(self):
-        sdc_car_png = cv2.imread('sources/sdc_car.png')
-        sdc_car_png = cv2.cvtColor(sdc_car_png, cv2.COLOR_BGR2RGB)
+        sdc_car_png = _source_image('sdc_car.png')
+        if sdc_car_png is None:            # no icon shipped: draw the ego box
+            self.axes.add_patch(matplotlib.patches.Rectangle(
+                (-1, -2), 2, 4, facecolor='#d9534f', edgecolor='k', zorder=5))
+            return
         self.axes.imshow(sdc_car_png, extent=(-1, 1, -2, 2))
 
     def render_legend(self):
-        legend = cv2.imread('sources/legend.png')
-        legend = cv2.cvtColor(legend, cv2.COLOR_BGR2RGB)
-        self.axes.imshow(legend, extent=(23, 51.2, -50, -40))
+        legend = _source_image('legend.png')
+        if legend is not None:
+            self.axes.imshow(legend, extent=(23, 51.2, -50, -40))

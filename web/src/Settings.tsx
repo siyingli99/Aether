@@ -32,6 +32,10 @@ export default function Settings({ state: s, catalog, sceneInfo, update }: Props
           <Field label="Max steps"><Num value={s.maxSteps} step={1} min={1} onChange={maxSteps => update({ maxSteps: Math.round(maxSteps) })} /></Field>
           <Field label="Seed"><Num value={s.seed} step={1} onChange={seed => update({ seed: Math.round(seed) })} /></Field>
         </div>
+        <Field label="Waypoint tracker">
+          <Segmented value={s.tracker} options={[{ id: 'pure_pursuit', label: 'Pure pursuit' }, { id: 'ilqr', label: 'iLQR (v0.1)' }]}
+            onChange={tracker => update({ tracker })} />
+        </Field>
         <p className="muted small">Episode ≤ {(s.dt * s.maxSteps).toFixed(1)} s; it also ends with the reconstruction.</p>
       </Section>
 

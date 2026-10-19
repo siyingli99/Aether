@@ -134,3 +134,80 @@ class BicycleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrackerTest(unittest.TestCase):
+    """Closed-loop tracking of a world path with plans re-issued every step."""
+
+    @staticmethod
+    def _plan_from_path(state, path, speed_ref, dt=0.5, n=6):
+        import math
+        from aether.agents.base import Plan
+        c, s = math.cos(state.yaw), math.sin(state.yaw)
+        rel = path - [state.x, state.y]
+        local = np.column_stack([rel @ [c, s], rel @ [-s, c]])
+        ahead = local[local[:, 0] > 0]
+        arc = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(ahead, axis=0).T))])
+        want = speed_ref * dt * np.arange(1, n + 1)
+        return Plan(np.column_stack([np.interp(want, arc, ahead[:, 0]),
+                                     np.interp(want, arc, ahead[:, 1])]), dt=dt)
+
+    def _drive(self, method, v0, speed_ref, turn_left=True):
+        from aether.agents.tracker import TrajectoryTracker
+        profile = load_profile("chrysler_pacifica")
+        model, tracker = BicycleModel(profile, 0.25), TrajectoryTracker(profile, method, 0.25)
+        sign = 1.0 if turn_left else -1.0
+        theta = np.linspace(0, np.pi / 2, 400)
+        path = np.vstack([np.column_stack([np.linspace(-20, 0, 50), np.zeros(50)]),
+                          np.column_stack([60 * np.sin(theta), sign * 60 * (1 - np.cos(theta))])])
+        state, ys = VehicleState(x=-10.0, v=v0), []
+        for _ in range(40):
+            accel, rate = tracker.control(self._plan_from_path(state, path, speed_ref),
+                                          state.v, state.steer)
+            state = model.step(state, accel, rate)
+            ys.append(state.y)
+        return state, np.array(ys)
+
+    def test_pursuit_turns_with_the_path(self):
+        for left in (True, False):
+            state, ys = self._drive("pure_pursuit", 10.0, 10.0, left)
+            self.assertGreater(np.sign(1 if left else -1) * ys[-1], 5.0)
+            self.assertTrue(np.all((1 if left else -1) * ys > -0.5))   # never swerves the other way
+
+    def test_infeasible_stop_does_not_swerve(self):
+        state, ys = self._drive("pure_pursuit", 16.6, 1.0, True)
+        self.assertTrue(np.all(ys > -0.5))
+        self.assertLess(state.v, 1.5)
+
+
+class GroundSmoothnessTest(unittest.TestCase):
+    def test_kerb_strip_off_corridor_is_rejected(self):
+        from aether.scene.ground import GroundModel
+        rng = np.random.default_rng(0)
+        xy = rng.uniform([-30, -30], [60, 30], size=(120000, 2))
+        z = rng.normal(0.0, 0.02, len(xy))
+        strip = (xy[:, 1] > 9.0) & (xy[:, 1] < 13.0)          # planting strip, 0.4 m high
+        z[strip] += 0.4
+        route = np.column_stack([np.linspace(0, 40, 50), np.zeros(50), np.zeros(50)])
+        ground = GroundModel.build(np.column_stack([xy, z]), route)
+        heights = ground.height(np.linspace(0, 40, 9), np.full(9, 11.0))
+        self.assertLess(float(np.max(np.abs(heights))), 0.12)
+        # A genuine slope off the corridor is kept.
+        z2 = z.copy()
+        z2[~strip] += 0.025 * np.maximum(xy[~strip, 1] - 4.0, 0.0)   # 2.5 % cross slope
+        ground2 = GroundModel.build(np.column_stack([xy, z2]), route)
+        self.assertGreater(float(ground2.height(20.0, -20.0)), -0.2)
+        self.assertGreater(float(ground2.height(20.0, 25.0)), 0.35)
+
+    def test_canopy_cells_off_corridor_are_ignored(self):
+        from aether.scene.ground import GroundModel
+        rng = np.random.default_rng(1)
+        xy = rng.uniform([-30, -40], [60, 40], size=(150000, 2))
+        z = rng.normal(0.0, 0.02, len(xy))
+        cell = np.floor(xy / 2.0).astype(int)
+        canopy = (np.abs(xy[:, 1]) > 12) & ((cell[:, 0] * 7 + cell[:, 1] * 3) % 5 < 2)
+        z[canopy] = 5.0 + rng.normal(0, 0.05, canopy.sum())    # tree crowns, no road below
+        route = np.column_stack([np.linspace(0, 40, 50), np.zeros(50), np.zeros(50)])
+        ground = GroundModel.build(np.column_stack([xy, z]), route)
+        gx, gy = np.meshgrid(np.linspace(0, 40, 9), np.linspace(-35, 35, 15))
+        self.assertLess(float(np.max(np.abs(ground.height(gx.ravel(), gy.ravel())))), 0.15)

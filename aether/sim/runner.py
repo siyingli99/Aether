@@ -254,7 +254,7 @@ def run_episode(scenario: Scenario, agent: str | EgoAgent | None = None,
                          "camera_names": cameras, "lidar_mount": env.rig.lidar_mount(),
                          "workdir": str(run / "agent")})
         ego_agent.reset()
-        tracker = TrajectoryTracker(env.profile)
+        tracker = TrajectoryTracker(env.profile, scenario.sim.tracker, env.dt)
         recorder = TrajectoryRecorder(env.bundle.hdmap, env.geometry.ground)
 
         info = env.reset()

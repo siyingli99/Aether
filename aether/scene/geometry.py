@@ -14,7 +14,7 @@ import numpy as np
 from ..geometry.frames import pose2d, yaw_of
 from ..vehicle.profile import VehicleProfile
 from .bundle import SceneBundle
-from .ground import GroundModel
+from .ground import MAX_GRADE, GroundModel
 
 
 @dataclass
@@ -57,6 +57,10 @@ def logged_centers(bundle: SceneBundle, vehicle: str | None = None) -> np.ndarra
     return np.column_stack([track.x + off * np.cos(track.yaw), track.y + off * np.sin(track.yaw)])
 
 
+
+MAX_OBJECT_PITCH = math.atan(MAX_GRADE)
+
+
 class SceneGeometry:
     def __init__(self, bundle: SceneBundle, profile: VehicleProfile, splats_scene: np.ndarray,
                  cache: bool = True) -> None:
@@ -84,7 +88,11 @@ class SceneGeometry:
             if str(data.get("key", "")) == key:
                 ground = GroundModel(data["origin"], float(data["resolution"]), data["heights"])
         if ground is None:
-            ground = GroundModel.build(splats_road, route)
+            hdmap = bundle.hdmap
+            drivable = None
+            if hdmap is not None and hdmap.drivable is not None:
+                drivable = lambda xy: hdmap.outside_distance(xy) < 1.0   # noqa: E731
+            ground = GroundModel.build(splats_road, route, drivable=drivable)
             if cache:
                 np.savez_compressed(cache_path, origin=ground.origin, resolution=ground.resolution,
                                     heights=ground.heights.astype(np.float32), key=key)
@@ -116,6 +124,10 @@ class SceneGeometry:
         digest.update(np.ascontiguousarray(splats[:: max(1, len(splats) // 4096)]).tobytes())
         digest.update(str(bundle.log.anchor.shape).encode())
         digest.update(np.ascontiguousarray(bundle.anchor_mount, dtype=np.float64).tobytes())
+        from .ground import VERSION
+        digest.update(f"ground-v{VERSION}".encode())
+        if bundle.hdmap_path is not None:
+            digest.update(str(bundle.hdmap_path.stat().st_mtime_ns).encode())
         return digest.hexdigest()[:16]
 
     # ---------------------------------------------------------------- poses
@@ -126,13 +138,19 @@ class SceneGeometry:
 
     def object_pose(self, x: float, y: float, yaw: float, length: float,
                     width: float, height: float) -> np.ndarray:
-        """Road-frame pose of an object's box centre, resting on the ground."""
+        """Road-frame pose of an object's box centre, resting on the ground.
+
+        Pitch comes from the ground under the axles, measured over at least
+        6 m and limited to ``MAX_OBJECT_PITCH`` (a 10 % grade): reconstructed
+        ground is noisy away from the driven corridor, real roads are not.
+        """
         c, s = math.cos(yaw), math.sin(yaw)
-        half = 0.5 * length * 0.8
+        half = max(0.5 * length * 0.8, 3.0)
         z_front = self.ground.height(x + half * c, y + half * s)
         z_rear = self.ground.height(x - half * c, y - half * s)
         pitch = -math.atan2(z_front - z_rear, 2 * half)
-        z = 0.5 * (z_front + z_rear) + 0.5 * height
+        pitch = min(max(pitch, -MAX_OBJECT_PITCH), MAX_OBJECT_PITCH)
+        z = float(self.ground.height(x, y)) + 0.5 * height
         return pose2d(x, y, yaw, z, pitch, 0.0)
 
     def to_scene(self, road_pose: np.ndarray) -> np.ndarray:

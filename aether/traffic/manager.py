@@ -26,7 +26,9 @@ from typing import Any
 
 import numpy as np
 
-from ..geometry.frames import pose_from_matrix
+import math
+
+from ..geometry.frames import pose2d, pose_from_matrix
 from .builtin import ExternalSimulator, IDMLanes, ReplayTraffic, ScriptedVehicles
 from .model import AgentState, TrafficModel, TrafficScene, as_agents, load_class
 
@@ -113,6 +115,9 @@ class TrafficManager:
         self.pose_overrides: dict[tuple[str, int], Any] = {}
         self._agents: list[TrafficAgent] = []
         self._raw: dict[str, list[AgentState]] = {}
+        # Per-vehicle low-pass state of height and pitch (suspension-like):
+        # the reconstructed ground is noisy off the driven corridor.
+        self._settle: dict[str, tuple[float, float, float]] = {}
         self.time = 0.0
 
     # ------------------------------------------------------------- helpers
@@ -200,6 +205,7 @@ class TrafficManager:
         self._slot_of.clear()
         self._free_slots = list(self.pool.instance_ids) if self.pool else []
         self._raw = {}
+        self._settle = {}
         if self.scripted:
             self._raw["vehicles"] = as_agents(self.scripted.reset(scene))
         if self.model:
@@ -256,8 +262,8 @@ class TrafficManager:
             for state in self._raw.get(source, []):
                 if state.id in self.edited_originals:
                     cls, idx = self.edited_originals[state.id]
-                    pose = self.geometry.to_scene(self.geometry.object_pose(
-                        state.x, state.y, state.yaw, state.length, state.width, state.height))
+                    pose = self.geometry.to_scene(self._settled(state.id, self.geometry.object_pose(
+                        state.x, state.y, state.yaw, state.length, state.width, state.height)))
                     agents.append(TrafficAgent(state, source, f"original:{cls}/{idx}", pose))
                     continue
                 vid = f"{source}:{state.id}"
@@ -267,11 +273,24 @@ class TrafficManager:
                     continue                      # pool exhausted: not rendered
                 l, w, h = self.slot_size.get(slot, (state.length, state.width, state.height))
                 shown = replace(state, length=l, width=w, height=h)
-                pose = self.geometry.to_scene(self.geometry.object_pose(
-                    shown.x, shown.y, shown.yaw, l, w, h))
+                pose = self.geometry.to_scene(self._settled(vid, self.geometry.object_pose(
+                    shown.x, shown.y, shown.yaw, l, w, h)))
                 agents.append(TrafficAgent(shown, source, f"asset:{slot}", pose))
         self._release(present)
         self._agents = agents
+
+    def _settled(self, key: str, pose: np.ndarray, tau: float = 0.4) -> np.ndarray:
+        """Low-pass height and pitch of a placed vehicle (time constant ``tau`` s)."""
+        x, y, yaw = pose_from_matrix(pose)
+        z, pitch = float(pose[2, 3]), math.asin(max(-1.0, min(1.0, -float(pose[2, 0]))))
+        prev = self._settle.get(key)
+        if prev is not None and self.time > prev[2]:
+            k = 1.0 - math.exp(-(self.time - prev[2]) / tau)
+            z, pitch = prev[0] + k * (z - prev[0]), prev[1] + k * (pitch - prev[1])
+        elif prev is not None:
+            z, pitch = prev[0], prev[1]
+        self._settle[key] = (z, pitch, self.time)
+        return pose2d(x, y, yaw, z, pitch, 0.0)
 
     def agents(self) -> list[TrafficAgent]:
         return list(self._agents)
